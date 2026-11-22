@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChartCopilot — 实时 K 线图表与 BYOK 人工智能副驾驶</title>
+  <meta name="description" content="仿 TradingView 实时多市场 K 线图表与自带 API Key 的 AI 副驾驶，支持搜索全球股票/加密货币并自动截屏画线标注关键支撑阻力位、趋势线与技术形态。" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- ================= TOP TOOLBAR ================= -->
+    <header class="top-bar" role="banner">
+      <div class="top-bar-left">
+        <button id="symbolTriggerBtn" class="symbol-trigger" type="button" title="搜索股票名称或代码 (快捷键 /)">
+          <svg class="icon-16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7"></circle>
+            <path d="M20 20l-3.8-3.8"></path>
+          </svg>
+          <span id="symbolTickerText" class="symbol-ticker">ALKALI</span>
+          <span id="symbolNameText" class="symbol-subname">碱金属有限公司</span>
+          <kbd class="kbd-hint">/</kbd>
+        </button>
+
+        <div class="tb-divider"></div>
+
+        <!-- Timeframe Selector -->
+        <nav class="timeframe-group" aria-label="K线周期">
+          <button type="button" class="tf-btn" data-interval="1m">1分</button>
+          <button type="button" class="tf-btn" data-interval="5m">5分</button>
+          <button type="button" class="tf-btn" data-interval="15m">15分</button>
+          <button type="button" class="tf-btn" data-interval="1h">1时</button>
+          <button type="button" class="tf-btn" data-interval="4h">4时</button>
+          <button type="button" class="tf-btn active" data-interval="1d">天</button>
+          <button type="button" class="tf-btn" data-interval="1w">周</button>
+        </nav>
+
+        <div class="tb-divider"></div>
+
+        <!-- Indicators Menu -->
+        <div class="dropdown-wrap">
+          <button id="indicatorMenuBtn" class="tb-btn" type="button">
+            <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 17l6-6 4 4 8-8"></path>
+              <path d="M17 7h4v4"></path>
+            </svg>
+            <span>指标</span>
+          </button>
+          <div id="indicatorDropdown" class="dropdown-menu">
+            <div class="dropdown-title">技术指标叠加</div>
+            <label class="dropdown-item">
+              <input type="checkbox" data-indicator-toggle="luxsr" checked />
+              <span>自动支撑与阻力位 [Auto S&amp;R]</span>
+            </label>
+            <label class="dropdown-item">
+              <input type="checkbox" data-indicator-toggle="volume" checked />
+              <span>成交量 (Volume)</span>
+            </label>
+            <label class="dropdown-item">
+              <input type="checkbox" data-indicator-toggle="macd" checked />
+              <span>MACD (10, 21, 9)</span>
+            </label>
+            <label class="dropdown-item">
+              <input type="checkbox" data-indicator-toggle="ema" checked />
+              <span id="emaMasterLabel">指数移动平均线 EMA</span>
+            </label>
+            <div id="emaPickerPanel" class="ema-picker-panel">
+              <div class="ema-picker-header">自主选择均线周期（与实时 K 线同步）</div>
+              <div id="emaPeriodGrid" class="ema-period-grid">
+                <button type="button" class="ema-chip active" data-ema-period="5"><i class="ema-dot" style="background:#f59e0b"></i>5日</button>
+                <button type="button" class="ema-chip active" data-ema-period="10"><i class="ema-dot" style="background:#06b6d4"></i>10日</button>
+                <button type="button" class="ema-chip active" data-ema-period="20"><i class="ema-dot" style="background:#2962ff"></i>20日</button>
+                <button type="button" class="ema-chip" data-ema-period="30"><i class="ema-dot" style="background:#ec4899"></i>30日</button>
+                <button type="button" class="ema-chip" data-ema-period="50"><i class="ema-dot" style="background:#ff6d00"></i>50日</button>
+                <button type="button" class="ema-chip" data-ema-period="60"><i class="ema-dot" style="background:#10b981"></i>60日</button>
+                <button type="button" class="ema-chip" data-ema-period="120"><i class="ema-dot" style="background:#8b5cf6"></i>120日</button>
+                <button type="button" class="ema-chip" data-ema-period="200"><i class="ema-dot" style="background:#a855f7"></i>200日</button>
+              </div>
+              <div id="customEmaList" class="ema-custom-list"></div>
+              <div class="ema-custom-row">
+                <input id="customEmaInput" type="number" min="2" max="500" placeholder="自定义如 9 / 21 / 144" />
+                <button id="btnAddCustomEma" type="button" class="ema-add-btn">+ 添加</button>
+              </div>
+            </div>
+            <label class="dropdown-item">
+              <input type="checkbox" data-indicator-toggle="boll" />
+              <span>布林带 Bollinger Bands (20, 2)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="tb-divider hide-md"></div>
+
+        <!-- Quick Market Switchers -->
+        <div class="quick-watchlist hide-md" aria-label="快捷自选">
+          <button type="button" class="wl-chip" data-quick-symbol="ALKALI.NS">ALKALI</button>
+          <button type="button" class="wl-chip" data-quick-symbol="^NSEI">NIFTY</button>
+          <button type="button" class="wl-chip" data-quick-symbol="005930.KS">三星</button>
+          <button type="button" class="wl-chip" data-quick-symbol="^KS11">KOSPI</button>
+          <button type="button" class="wl-chip" data-quick-symbol="NVDA">NVDA</button>
+          <button type="button" class="wl-chip" data-quick-symbol="BTCUSDT">BTC</button>
+        </div>
+      </div>
+
+      <div class="top-bar-right">
+        <button id="btnAiAnnotateNow" class="cta-annotate-btn" type="button" title="截取当前 K 线图并让 AI 自动画线标注">
+          <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"></path>
+            <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"></path>
+          </svg>
+          <span>截屏并 AI 标注</span>
+        </button>
+
+        <button id="btnExportPine" class="tb-btn hide-sm" type="button" title="将 AI 标注导出为 TradingView Pine Script v5 代码">
+          <span>Pine 脚本</span>
+        </button>
+
+        <div id="liveStatusBadge" class="live-badge status-loading" title="实时行情状态">
+          <span class="live-dot"></span>
+          <span id="liveStatusText">连接中</span>
+        </div>
+
+        <button id="btnApiSettings" class="api-btn" type="button" title="配置您自己的 DeepSeek / OpenAI / OpenRouter API Key">
+          <svg class="icon-14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+          </svg>
+          <span id="apiStatusLabel">API Key 设置</span>
+        </button>
+
+        <select id="langSelect" class="lang-select" aria-label="界面与AI图表语言" title="切换界面与 AI 绘图语言">
+          <option value="zh-CN">🌐 简体中文</option>
+          <option value="zh-TW">🌐 繁體中文</option>
+          <option value="en">🌐 English</option>
+          <option value="ja">🌐 日本語</option>
+          <option value="ko">🌐 한국어</option>
+        </select>
+
+        <button id="btnThemeToggle" class="icon-btn" type="button" title="切换亮色 / 暗色主题">☾</button>
+
+        <button id="btnToggleCopilot" class="icon-btn copilot-toggle-btn" type="button" title="展开/收起人工智能副驾驶">
+          <svg class="icon-16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+            <line x1="15" y1="3" x2="15" y2="21"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ================= MAIN WORKSPACE ================= -->
+    <div class="workspace-body">
+      <!-- Left TradingView Drawing Rail -->
+      <aside class="left-rail" aria-label="画线工具栏">
+        <button type="button" class="rail-btn active" data-draw-tool="crosshair" title="十字光标">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <line x1="12" y1="3" x2="12" y2="21"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <circle cx="12" cy="12" r="2"></circle>
+          </svg>
+        </button>
+        <button type="button" class="rail-btn" data-draw-tool="trendline" title="手动绘制趋势线（点击两点）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <line x1="5" y1="19" x2="19" y2="5"></line>
+            <circle cx="5" cy="19" r="2.2" fill="currentColor"></circle>
+            <circle cx="19" cy="5" r="2.2" fill="currentColor"></circle>
+          </svg>
+        </button>
+        <button type="button" class="rail-btn" data-draw-tool="hline" title="手动绘制水平支撑/压力线">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <circle cx="12" cy="12" r="2.2" fill="currentColor"></circle>
+          </svg>
+        </button>
+        <button type="button" class="rail-btn" data-draw-tool="box" title="手动绘制区间/形态框">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="4" y="6" width="16" height="12" rx="1.5"></rect>
+          </svg>
+        </button>
+        <button type="button" class="rail-btn" data-draw-tool="measure" title="涨跌幅与 K 线测距尺">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 18L18 4l2 2L6 20l-2-2z"></path>
+            <path d="M9 13l1.5 1.5M12 10l1.5 1.5M15 7l1.5 1.5"></path>
+          </svg>
+        </button>
+
+        <div class="rail-sep"></div>
+
+        <button id="btnToggleAiLayer" type="button" class="rail-btn active" title="显示 / 隐藏 AI 标注层">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M12 3l1.8 4.4L18.2 9.2l-4.4 1.8L12 15.4l-1.8-4.4-4.4-1.8 4.4-1.8L12 3z"></path>
+          </svg>
+        </button>
+        <button id="btnQuickSnapshot" type="button" class="rail-btn" title="打开截屏标注工作室（预览/编辑/下载PNG）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+            <circle cx="12" cy="13" r="4"></circle>
+          </svg>
+        </button>
+        <button id="btnClearDrawings" type="button" class="rail-btn danger" title="清除图表上所有 AI 及手动标注">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+            <path d="M10 11v6M14 11v6"></path>
+          </svg>
+        </button>
+      </aside>
+
+      <!-- Center Real-Time Chart Stage -->
+      <main class="chart-stage" aria-label="实时K线图表">
+        <!-- Top-Left TradingView OHLCV Legend HUD -->
+        <div class="chart-hud">
+          <div class="hud-row-main">
+            <span class="hud-dot"></span>
+            <h1 id="hudInstrumentTitle" class="hud-title">碱金属有限公司 · 1天</h1>
+            <span id="hudExchangeBadge" class="hud-exchange">NSE</span>
+            <span id="hudDataStatusBadge" class="hud-data-status status-loading" data-feed-status="loading">连接中</span>
+            <div id="hudOHLCV" class="hud-ohlcv"></div>
+          </div>
+          <div id="hudIndicatorLine" class="hud-row-ind"></div>
+        </div>
+
+        <!-- Independent DOM Overlay Watermark for Simulated Data (decoupled from canvas for M1 migration) -->
+        <div id="simulatedWatermark" class="simulated-watermark" data-watermark-visible="false" aria-hidden="true" hidden>
+          <div class="sim-watermark-diagonal">SIMULATED DATA · 模拟演示行情</div>
+          <div class="sim-watermark-banner">
+            <span class="sim-watermark-icon">⚠️</span>
+            <span id="simWatermarkText">当前为模拟演示数据（非真实市场行情），仅供演示参考</span>
+          </div>
+        </div>
+
+        <!-- Interactive Multi-Pane Canvas -->
+        <canvas id="mainChartCanvas" aria-label="实时K线与MACD图表画布"></canvas>
+
+        <!-- Floating AI Annotation Layer Filter Bar -->
+        <div id="aiLayerBar" class="ai-layer-bar" role="toolbar" aria-label="AI标注图层筛选">
+          <span id="aiLayerBarLabel" class="layer-bar-label">AI 标注图层</span>
+          <button type="button" class="layer-chip active" data-ai-layer="horizontalLevels">支撑/阻力</button>
+          <button type="button" class="layer-chip active" data-ai-layer="trendlines">趋势线</button>
+          <button type="button" class="layer-chip active" data-ai-layer="patterns">技术形态</button>
+          <button type="button" class="layer-chip active" data-ai-layer="signals">信号标记</button>
+          <button type="button" class="layer-chip active" data-ai-layer="tradePlan">进出场计划</button>
+          <select id="chartLangSelect" class="chart-lang-select" title="单独切换图表与截屏上的 AI 标注文字语言">
+            <option value="zh-CN">标注: 简中</option>
+            <option value="zh-TW">标注: 繁中</option>
+            <option value="en">Labels: EN</option>
+            <option value="ja">描画: 日本語</option>
+            <option value="ko">작도: 한국어</option>
+          </select>
+          <button id="btnClearAiOverlay" type="button" class="layer-chip-clear" title="移除 AI 图层">✕</button>
+        </div>
+
+        <!-- Floating Bottom-Center Zoom Controls -->
+        <div class="chart-zoom-controls">
+          <button id="btnZoomOut" type="button" title="缩小">−</button>
+          <button id="btnZoomIn" type="button" title="放大">+</button>
+          <button id="btnZoomReset" type="button" title="重置视角">重置</button>
+        </div>
+      </main>
+
+      <!-- Resizer Handle -->
+      <div id="copilotResizer" class="panel-resizer" title="拖拽调整副驾驶面板宽度"></div>
+
+      <!-- Right Sidebar: AI Copilot (Faithful to TradingView AI Copilot) -->
+      <aside id="copilotPane" class="copilot-pane" aria-label="人工智能副驾驶">
+        <div class="copilot-header">
+          <div class="copilot-header-title">
+            <svg class="icon-16 copilot-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3z"></path>
+            </svg>
+            <span>人工智能副驾驶</span>
+          </div>
+          <div class="copilot-header-actions">
+            <button id="btnNewChat" class="copilot-head-btn" type="button" title="新建对话">新聊天</button>
+            <button id="btnCopilotSettings" class="copilot-icon-btn" type="button" title="API Key 与模型设置">
+              <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
+            </button>
+            <button id="btnCloseCopilot" class="copilot-icon-btn" type="button" title="收起副驾驶">✕</button>
+          </div>
+        </div>
+
+        <div id="demoModeBanner" class="demo-mode-banner" hidden>
+          <span class="demo-banner-icon">⚠️</span>
+          <span id="demoModeBannerText">当前为模拟数据：AI 分析默认已禁用（开启下方「演示模式」开关后可运行演示分析）</span>
+        </div>
+
+        <div class="copilot-body">
+          <!-- Welcome Empty State (Mirroring TradingView AI Copilot Screenshot) -->
+          <div id="copilotWelcome" class="copilot-welcome">
+            <h2 class="welcome-heading">您好，交易员，图表一直都在。我能帮您什么吗？</h2>
+            <p class="welcome-sub">支持使用您自己的 DeepSeek / OpenAI / OpenRouter API Key，自动分析实时 K 线并在<strong>截屏图片</strong>与<strong>实时图表</strong>上同步画线标注。</p>
+
+            <div class="quick-prompts">
+              <button type="button" class="prompt-chip" data-quick-prompt="在此图表上标记关键支撑位和压力水平线，并在截屏上清晰标注价格">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">在此图表上标记关键水平</span>
+              </button>
+              <button type="button" class="prompt-chip" data-quick-prompt="识别当前 K 线中的上升/下降趋势线与经典技术形态（三角形、通道、双底等），并标注突破目标">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">识别技术形态与趋势线</span>
+              </button>
+              <button type="button" class="prompt-chip" data-quick-prompt="计划出入口：请结合支撑压力与 MACD/RSI 制定具体的入场价、止损位、止盈目标与盈亏比，并画在图表上">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">计划出入口</span>
+              </button>
+              <button type="button" class="prompt-chip" data-quick-prompt="这张图表目前是看涨还是看跌？请结合价格结构、成交量与 MACD 给出明确结论并标注关键拐点">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">这张图表是看涨还是看跌？</span>
+              </button>
+              <button type="button" class="prompt-chip" data-quick-prompt="请评价我目前的图表配置与风险位，检查是否存在假突破或背离信号">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">请评价我目前的配置</span>
+              </button>
+              <button id="quickPromptDynamic" type="button" class="prompt-chip" data-quick-prompt="全面分析 ALKALI 的最新走势，标注关键支撑阻力位、趋势线与技术形态">
+                <span class="spark-glyph">✦</span>
+                <span class="chip-text">ALKALI 的最新技术走势如何？</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Chat Message Stream -->
+          <div id="copilotChatFeed" class="copilot-feed"></div>
+        </div>
+
+        <!-- Bottom Composer -->
+        <div class="copilot-composer-wrap">
+          <div class="composer-toggles">
+            <label class="mini-toggle" title="自动截取当前图表并在图片上绘制 AI 标注">
+              <input id="chkAttachScreenshot" type="checkbox" checked />
+              <span>截屏标注图</span>
+            </label>
+            <label class="mini-toggle" title="同步在实时交互 K 线上绘制支撑阻力、趋势线与形态">
+              <input id="chkAutoDraw" type="checkbox" checked />
+              <span>同步画线到图表</span>
+            </label>
+            <label class="mini-toggle demo-mode-toggle" title="模拟数据下默认禁用 AI 分析；开启演示模式后允许在模拟数据下运行分析（声明仅显示在横幅与水印，不进入复制文本）">
+              <input id="chkDemoMode" type="checkbox" />
+              <span id="lblDemoMode">演示模式</span>
+            </label>
+          </div>
+          <div class="composer-box">
+            <textarea
+              id="copilotPromptInput"
+              rows="2"
+              placeholder="询问有关 ALKALI 的任何内容（支持自动截屏画线）……"
+            ></textarea>
+            <div class="composer-footer">
+              <button id="modelSwitcherBtn" type="button" class="model-pill-btn" title="切换模型或配置 API Key">
+                <span id="activeModelText">内置量化引擎 (演示)</span>
+                <span class="caret">▾</span>
+              </button>
+              <button id="btnSendPrompt" type="button" class="send-btn" title="发送分析请求 (Enter)">
+                <svg class="icon-15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+                  <line x1="12" y1="19" x2="12" y2="5"></line>
+                  <polyline points="5 12 12 5 19 12"></polyline>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- ================= MODAL 1: SYMBOL SEARCH ================= -->
+  <div id="symbolSearchModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="symbolSearchTitle">
+    <div class="modal-card modal-search">
+      <div class="modal-head">
+        <h3 id="symbolSearchTitle">商品代码搜索</h3>
+        <button id="symbolSearchClose" type="button" class="modal-close">✕</button>
+      </div>
+      <div class="search-input-row">
+        <svg class="icon-18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="M20 20l-3.8-3.8"></path>
+        </svg>
+        <input
+          id="symbolSearchInput"
+          type="text"
+          autocomplete="off"
+          placeholder="输入股票代码或中/英/韩名称（如 RELIANCE.NS、005930.KS、三星、삼성전자、ALKALI、NVDA、BTCUSDT）..."
+        />
+      </div>
+      <div class="market-tabs" role="tablist">
+        <button type="button" class="mkt-tab active" data-market-tab="all">全部</button>
+        <button type="button" class="mkt-tab" data-market-tab="in">印股 NSE/BSE</button>
+        <button type="button" class="mkt-tab" data-market-tab="kr">韩股 KRX</button>
+        <button type="button" class="mkt-tab" data-market-tab="us">美股</button>
+        <button type="button" class="mkt-tab" data-market-tab="hk">港股</button>
+        <button type="button" class="mkt-tab" data-market-tab="cn">A 股</button>
+        <button type="button" class="mkt-tab" data-market-tab="crypto">加密货币</button>
+        <button type="button" class="mkt-tab" data-market-tab="forex">外汇 / 商品</button>
+      </div>
+      <div id="symbolSearchStatus" class="search-status-bar">加载中...</div>
+      <div id="symbolSearchResults" class="search-results-list"></div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL 2: BYOK API KEY SETTINGS ================= -->
+  <div id="apiSettingsModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="apiSettingsTitle">
+    <div class="modal-card modal-settings">
+      <div class="modal-head">
+        <h3 id="apiSettingsTitle">AI 模型与自定义 API Key 设置 (BYOK)</h3>
+        <button id="btnCloseSettings" type="button" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body-scroll">
+        <p class="settings-intro">
+          支持 DeepSeek 及所有 OpenAI 兼容接口。您的 API Key 仅保存在当前浏览器本地 <code>localStorage</code> 中，服务端仅作无状态转发以解决跨域问题，绝不落盘存储。
+        </p>
+
+        <div class="form-group">
+          <label class="form-label">快速选择服务商预设</label>
+          <div class="preset-grid">
+            <button type="button" class="preset-btn active" data-provider-preset="deepseek">DeepSeek 官方</button>
+            <button type="button" class="preset-btn" data-provider-preset="openai">OpenAI 官方</button>
+            <button type="button" class="preset-btn" data-provider-preset="openrouter">OpenRouter</button>
+            <button type="button" class="preset-btn" data-provider-preset="siliconflow">硅基流动</button>
+            <button type="button" class="preset-btn" data-provider-preset="ollama">本地 Ollama</button>
+            <button type="button" class="preset-btn" data-provider-preset="custom">自定义 HTTPS</button>
+          </div>
+          <div id="providerNote" class="form-hint"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputApiKey">API Key</label>
+          <div class="input-with-btn">
+            <input id="inputApiKey" type="password" autocomplete="off" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" />
+            <button id="btnToggleKeyVis" type="button" class="input-inline-btn">显示</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputBaseUrl">API Base URL（兼容 OpenAI /v1 规范）</label>
+          <input id="inputBaseUrl" type="text" placeholder="https://api.deepseek.com/v1" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputModelName">模型 ID (Model)</label>
+          <input id="inputModelName" type="text" placeholder="deepseek-chat" />
+          <div id="modelQuickChips" class="model-chip-row"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="vision-toggle-card">
+            <input id="chkEnableVision" type="checkbox" />
+            <div>
+              <div class="vision-title">启用多模态视觉识图（将图表截屏图片一并发送给 AI）</div>
+              <div class="vision-desc">GPT-4o / Claude 3.7 / Gemini / Qwen-VL 等视觉模型建议开启；DeepSeek-V3 / R1 纯文本模型请保持关闭（系统仍会自动发送精确 K 线数据并生成 AI 截屏标注图）。</div>
+            </div>
+          </label>
+        </div>
+
+        <div class="test-row">
+          <button id="btnTestApi" type="button" class="btn-secondary">测试 API 连接</button>
+          <span id="apiTestResult" class="api-test-result"></span>
+        </div>
+      </div>
+
+      <div class="modal-foot">
+        <button id="btnClearApiKey" type="button" class="btn-ghost-danger">清除 Key（切回演示引擎）</button>
+        <button id="btnSaveApiSettings" type="button" class="btn-primary">保存配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL 3: SCREENSHOT ANNOTATION STUDIO ================= -->
+  <div id="screenshotStudioModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="studioTitle">
+    <div class="modal-card modal-studio">
+      <div class="modal-head">
+        <h3 id="studioTitle">截屏标注工作室</h3>
+        <div class="studio-head-actions">
+          <button id="studioCopy" type="button" class="btn-secondary">复制图片</button>
+          <button id="studioDownload" type="button" class="btn-primary">下载高清 PNG</button>
+          <button id="studioClose" type="button" class="modal-close">✕</button>
+        </div>
+      </div>
+      <div class="studio-toolbar">
+        <div class="studio-group">
+          <label class="studio-switch">
+            <input id="studioCompareOriginal" type="checkbox" />
+            <span>仅看原始截屏（前后对比）</span>
+          </label>
+        </div>
+        <div class="studio-divider"></div>
+        <div class="studio-group">
+          <span class="studio-group-label">标注语言:</span>
+          <select id="studioLangSelect" class="chart-lang-select" aria-label="截屏标注语言">
+            <option value="zh-CN">简体中文</option>
+            <option value="zh-TW">繁體中文</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+          </select>
+        </div>
+        <div class="studio-divider"></div>
+        <div class="studio-group">
+          <span class="studio-group-label">AI 图层:</span>
+          <label class="studio-chk"><input type="checkbox" data-studio-layer="horizontalLevels" checked />支撑/阻力</label>
+          <label class="studio-chk"><input type="checkbox" data-studio-layer="trendlines" checked />趋势线</label>
+          <label class="studio-chk"><input type="checkbox" data-studio-layer="patterns" checked />技术形态</label>
+          <label class="studio-chk"><input type="checkbox" data-studio-layer="signals" checked />信号</label>
+          <label class="studio-chk"><input type="checkbox" data-studio-layer="tradePlan" checked />交易计划</label>
+        </div>
+        <div class="studio-divider"></div>
+        <div class="studio-group">
+          <span class="studio-group-label">二次手绘:</span>
+          <button type="button" class="studio-tool-btn" data-studio-tool="arrow">箭头</button>
+          <button type="button" class="studio-tool-btn" data-studio-tool="line">直线</button>
+          <button type="button" class="studio-tool-btn" data-studio-tool="rect">高亮框</button>
+          <button type="button" class="studio-tool-btn" data-studio-tool="text">文字</button>
+          <button id="studioUndo" type="button" class="studio-tool-btn">撤销</button>
+          <button id="studioClearMarkup" type="button" class="studio-tool-btn">清空手绘</button>
+        </div>
+      </div>
+      <div class="studio-canvas-stage">
+        <canvas id="studioCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL 4: PINE SCRIPT EXPORTER ================= -->
+  <div id="pineScriptModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pineModalTitle">
+    <div class="modal-card modal-pine">
+      <div class="modal-head">
+        <h3 id="pineModalTitle">导出 TradingView Pine Script v5</h3>
+        <button id="btnClosePine" type="button" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body-scroll">
+        <p class="settings-intro">复制下方代码并粘贴到真实 TradingView 的 Pine 编辑器（Pine Editor）中点击“添加到图表”，即可还原本次 AI 标注的所有支撑/阻力位、趋势线与交易计划。</p>
+        <textarea id="pineCodeArea" class="pine-textarea" readonly spellcheck="false"></textarea>
+      </div>
+      <div class="modal-foot">
+        <button id="btnCopyPine" type="button" class="btn-primary">复制 Pine Script</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

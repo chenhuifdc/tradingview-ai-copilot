@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tradingview-ai-copilot
+    runtime: node
+    plan: free
+    buildCommand: "node -v"
+    startCommand: "node server.js"
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
