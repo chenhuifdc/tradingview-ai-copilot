@@ -425,3 +425,57 @@ test('R3.6 searchSymbols generates direct fallback candidates (India NSE/BSE, Ko
     await new Promise((r) => srv.close(r));
   }
 });
+
+test('R3.7 Eastmoney search uses fixed public parameter constant and is never overridden by env vars or user input', async () => {
+  const { EASTMONEY_PUBLIC_SUGGEST_PARAM } = require('../server/marketService');
+  assert.equal(EASTMONEY_PUBLIC_SUGGEST_PARAM, 'D43BF722C8E33BDC906FB84D85E326E8');
+
+  const prevEnv = {
+    EASTMONEY_TOKEN: process.env.EASTMONEY_TOKEN,
+    TOKEN: process.env.TOKEN,
+    API_TOKEN: process.env.API_TOKEN
+  };
+  process.env.EASTMONEY_TOKEN = 'ENV_OVERRIDE_SHOULD_NOT_BE_USED';
+  process.env.TOKEN = 'ENV_TOKEN_SHOULD_NOT_BE_USED';
+  process.env.API_TOKEN = 'ENV_API_TOKEN_SHOULD_NOT_BE_USED';
+
+  const capturedUrls = [];
+  const svc = createMarketService({
+    sleepFn: async () => {},
+    resilienceConfig: { retry: { maxRetriesPerNode: 0 } },
+    fetchFn: async (url) => {
+      capturedUrls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ QuotationCodeTable: { Data: [] } })
+      };
+    }
+  });
+
+  try {
+    // Attempt query-parameter injection via user query string
+    await svc.searchSymbols('茅台&token=USER_INJECTED_TOKEN', 'all');
+    assert.equal(capturedUrls.length, 1);
+    const parsed = new URL(capturedUrls[0]);
+    assert.equal(parsed.hostname, 'searchapi.eastmoney.com');
+    assert.deepEqual(
+      parsed.searchParams.getAll('token'),
+      [EASTMONEY_PUBLIC_SUGGEST_PARAM],
+      'Outgoing Eastmoney token query param must strictly equal the fixed public constant'
+    );
+    assert.equal(parsed.searchParams.get('input'), '茅台&token=USER_INJECTED_TOKEN');
+    assert.equal(capturedUrls[0].includes('ENV_OVERRIDE'), false);
+    assert.equal(capturedUrls[0].includes('ENV_TOKEN'), false);
+  } finally {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    svc.klineCache.destroy();
+    svc.quoteCache.destroy();
+    svc.fundamentalsCache.destroy();
+    svc.simCache.destroy();
+  }
+});
+

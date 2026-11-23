@@ -12,6 +12,9 @@ const { LruTtlCache, CoalescingLruCache, NodeCircuitBreaker } = require('./cache
 
 const PRICE_BASIS = 'split_adjusted_raw_ohlc';
 
+// 该值为东方财富公开接口参数，非密钥
+const EASTMONEY_PUBLIC_SUGGEST_PARAM = 'D43BF722C8E33BDC906FB84D85E326E8';
+
 const INTERVAL_CONFIG = {
   '1m':  { binance: '1m',  yahooInterval: '1m',  yahooRange: '5d',  yahooQuoteRange: '1d',  binanceLimit: 500,  binanceQuoteLimit: 30, sec: 60 },
   '5m':  { binance: '5m',  yahooInterval: '5m',  yahooRange: '1mo', yahooQuoteRange: '5d',  binanceLimit: 500,  binanceQuoteLimit: 30, sec: 300 },
@@ -749,7 +752,7 @@ function createMarketService({
     // 3) Eastmoney Chinese stock search (A-shares, HK, US Chinese names)
     const eastmoneyPromise = (async () => {
       if ((!hasCJK && !looksLikeCnOrKrCode) || market === 'in' || market === 'kr') return [];
-      const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=10`;
+      const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(q)}&type=14&token=${EASTMONEY_PUBLIC_SUGGEST_PARAM}&count=10`;
       const data = await fetchJsonWithTimeout(url, {}, resCfg.timeoutMs.search);
       const rows = Array.isArray(data?.QuotationCodeTable?.Data) ? data.QuotationCodeTable.Data : [];
       const mapped = [];
@@ -1671,5 +1674,6 @@ module.exports = {
   CACHE_CONFIG,
   RESILIENCE_CONFIG,
   UPSTREAM_NODES,
-  PRICE_BASIS
+  PRICE_BASIS,
+  EASTMONEY_PUBLIC_SUGGEST_PARAM
 };

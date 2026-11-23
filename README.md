@@ -74,3 +74,8 @@ npm test
 npm test && npm run test:browser
 ```
 
+## 安全注意事项：`standalone_单文件版.html`
+
+> **警告**：仓库中的 `standalone_单文件版.html` 来自旧版本，**未包含第 0 步的 XSS 转义与渲染安全修复**，存在已知的 XSS 缺口，且不包含服务端 SSRF 代理与缓存容错能力。在 M8 最终决定其去留（重建或废弃）之前，**请勿对外分发或在生产环境使用该单文件**。
+
+
