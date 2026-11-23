@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChartCopilot · 批量分析与导出</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8f9fd; color: #131722; }
+    .batch-shell { max-width: 1120px; margin: 24px auto; padding: 0 20px; }
+    .batch-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .batch-card { background: #fff; border: 1px solid #e0e3eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .batch-controls { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 12px; align-items: end; }
+    .batch-controls textarea { width: 100%; min-height: 84px; padding: 8px; border: 1px solid #d1d4dc; border-radius: 6px; font-family: monospace; }
+    .batch-controls input, .batch-controls select { width: 100%; padding: 6px 8px; border: 1px solid #d1d4dc; border-radius: 6px; }
+    .batch-actions { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+    .batch-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .batch-table th, .batch-table td { border-bottom: 1px solid #e0e3eb; padding: 8px 10px; text-align: left; }
+    .batch-table th { background: #f0f3fa; font-weight: 600; }
+    #batchRenderStage { width: 1600px; height: 824px; position: fixed; left: -9999px; top: 0; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div class="batch-shell">
+    <div class="batch-head">
+      <h2>ChartCopilot · 批量生成（PNG + 报告文本 + manifest.json）</h2>
+      <a href="/" class="btn-secondary" style="text-decoration:none;padding:6px 12px;">返回主图表</a>
+    </div>
+
+    <div class="batch-card">
+      <div class="batch-controls">
+        <div>
+          <label for="batchSymbols"><strong>股票列表（换行/逗号/空格分隔）</strong></label>
+          <textarea id="batchSymbols">RELIANCE.NS
+TCS.NS
+HDFCBANK.NS
+SUNPHARMA.NS
+ITC.NS</textarea>
+        </div>
+        <div>
+          <label for="batchInterval">周期</label>
+          <select id="batchInterval">
+            <option value="1d" selected>1d (日线)</option>
+            <option value="1h">1h</option>
+          </select>
+        </div>
+        <div>
+          <label for="batchConcurrency">并发数</label>
+          <input id="batchConcurrency" type="number" min="1" max="4" value="1" />
+        </div>
+        <div>
+          <label for="batchDelay">限速间隔 (ms)</label>
+          <input id="batchDelay" type="number" min="0" max="5000" value="150" />
+        </div>
+      </div>
+
+      <div class="batch-actions">
+        <label><input id="batchAllowSimulated" type="checkbox" /> 允许模拟数据（默认跳过）</label>
+        <button id="btnBatchStart" type="button" class="btn-primary">开始批量生成</button>
+        <button id="btnBatchResume" type="button" class="btn-secondary">断点续跑</button>
+        <button id="btnBatchDownloadZip" type="button" class="btn-secondary" disabled>打包下载 ZIP</button>
+        <span id="batchStatusText" style="margin-left:auto;font-size:13px;color:#5d606b;">就绪</span>
+      </div>
+    </div>
+
+    <div class="batch-card">
+      <table class="batch-table">
+        <thead>
+          <tr>
+            <th>输入代码</th>
+            <th>解析代码</th>
+            <th>交易所</th>
+            <th>数据来源</th>
+            <th>状态</th>
+            <th>校验</th>
+            <th>备注/失败原因</th>
+          </tr>
+        </thead>
+        <tbody id="batchResultsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="batchRenderStage"></div>
+  <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+  <script type="module" src="/js/batchApp.js"></script>
+</body>
+</html>
