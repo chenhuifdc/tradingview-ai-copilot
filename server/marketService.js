@@ -1011,9 +1011,9 @@ function createMarketService({
     }
   }
 
-  async function getLatestTick(symbol, interval = '1d') {
-    const keyInfo = buildMarketCacheKey({ type: 'quote', symbol, interval });
-    const klineKeyInfo = buildMarketCacheKey({ type: 'klines', symbol, interval });
+  async function getLatestTick(symbol, interval = '1d', range = undefined) {
+    const keyInfo = buildMarketCacheKey({ type: 'quote', symbol, interval, range });
+    const klineKeyInfo = buildMarketCacheKey({ type: 'klines', symbol, interval, range });
     const ttlMs = cfg.ttlMs.quote[keyInfo.interval] || cfg.ttlMs.quote['1d'];
     const maxStaleMs = cfg.maxStaleMs[keyInfo.interval] || cfg.maxStaleMs['1d'];
 

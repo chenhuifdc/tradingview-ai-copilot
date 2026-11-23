@@ -148,7 +148,8 @@ function createAppServer(options = {}) {
       if (pathname === '/api/quote' && req.method === 'GET') {
         const symbol = searchParams.get('symbol') || 'ALKALI.NS';
         const interval = searchParams.get('interval') || '1d';
-        const data = await svc.getLatestTick(symbol, interval);
+        const range = searchParams.get('range') || undefined;
+        const data = await svc.getLatestTick(symbol, interval, range);
         return sendJson(res, 200, data);
       }
 

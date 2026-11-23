@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
+const { createAppServer } = require('../server');
 const {
   LruTtlCache,
   SingleFlightGroup,
@@ -245,3 +247,63 @@ test('1.7 Indian equity NSE (.NS) -> BSE (.BO) automatic fallback when NSE retur
   assert.equal(res.meta.exchangeFallback, true);
   assert.equal(res.candles.length, 8);
 });
+
+function httpGetJson(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path: urlPath, method: 'GET', headers: { Connection: 'close' } },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('HTTP /api/quote forwards range parameter into cache key and upstream request', async () => {
+  const requestedUrls = [];
+  const svc = createMarketService({
+    fetchFn: async (url) => {
+      requestedUrls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(makeYahooPayload('RELIANCE.NS', 6))
+      };
+    }
+  });
+
+  const srv = createAppServer({ marketService: svc });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address();
+
+  try {
+    const r1 = await httpGetJson(port, '/api/quote?symbol=RELIANCE.NS&interval=1d&range=3mo');
+    assert.equal(r1.status, 200);
+    assert.equal(r1.json.meta.source, 'live');
+    assert.match(requestedUrls[0], /range=3mo/, 'First upstream request must forward range=3mo');
+
+    // Different range must NOT hit the 3mo cache key and must query upstream with range=6mo
+    const r2 = await httpGetJson(port, '/api/quote?symbol=RELIANCE.NS&interval=1d&range=6mo');
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.meta.source, 'live');
+    assert.equal(requestedUrls.length, 2, 'Different range values must use distinct cache keys');
+    assert.match(requestedUrls[1], /range=6mo/, 'Second upstream request must forward range=6mo');
+
+    // Repeating range=3mo must hit cache without triggering a 3rd upstream call
+    const r3 = await httpGetJson(port, '/api/quote?symbol=RELIANCE.NS&interval=1d&range=3mo');
+    assert.equal(r3.status, 200);
+    assert.equal(requestedUrls.length, 2, 'Repeated range=3mo must hit cache');
+    assert.equal(r3.json.cacheHit, true);
+    assert.equal(r3.json.meta.source, 'cache');
+  } finally {
+    if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  }
+});
+
