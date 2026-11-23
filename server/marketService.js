@@ -46,12 +46,12 @@ const INTERVAL_ALIASES = {
 
 const UPSTREAM_NODES = {
   yahoo: [
-    { id: 'yahoo_query1', baseUrl: 'https://query1.finance.yahoo.com' },
-    { id: 'yahoo_query2', baseUrl: 'https://query2.finance.yahoo.com' }
+    { id: 'yahoo:query1', baseUrl: 'https://query1.finance.yahoo.com' },
+    { id: 'yahoo:query2', baseUrl: 'https://query2.finance.yahoo.com' }
   ],
   binance: [
-    { id: 'binance_vision', baseUrl: 'https://data-api.binance.vision' },
-    { id: 'binance_main', baseUrl: 'https://api.binance.com' }
+    { id: 'binance:data-api', baseUrl: 'https://data-api.binance.vision' },
+    { id: 'binance:api', baseUrl: 'https://api.binance.com' }
   ]
 };
 
@@ -929,7 +929,7 @@ function createMarketService({
       fetchedAt: fetchedAt ?? now,
       now,
       stale,
-      provider: rawPayload.source === 'simulated' ? 'simulated' : keyInfo.provider,
+      provider: rawPayload.source === 'simulated' ? 'simulated' : (rawPayload.providerNode || keyInfo.provider),
       priceBasis: rawPayload.priceBasis || PRICE_BASIS,
       latestBarTime: lastBar?.time ?? null,
       market: resolvedMkt,

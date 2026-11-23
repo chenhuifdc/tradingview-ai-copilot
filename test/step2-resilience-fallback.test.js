@@ -438,3 +438,75 @@ test('HTTP /api/klines returns source=cache and stale=true after TTL + periodic 
   }
 });
 
+test('meta.provider reports concrete upstream node (yahoo:query1/query2, binance:data-api/api) across unit and HTTP paths', async () => {
+  const makeBinanceRows = () => [
+    [1711008000000, '65000', '65500', '64800', '65200', '120.5'],
+    [1711094400000, '65200', '66000', '65100', '65900', '145.2']
+  ];
+
+  let failYahooQuery1 = false;
+  let failBinanceDataApi = false;
+
+  const svc = createMarketService({
+    sleepFn: async () => {},
+    resilienceConfig: { retry: { maxRetriesPerNode: 0 } },
+    fetchFn: async (url) => {
+      if (url.includes('query1.finance.yahoo.com')) {
+        if (failYahooQuery1) throw new Error('query1 down');
+        return { ok: true, status: 200, text: async () => JSON.stringify(makeYahooPayload('RELIANCE.NS', 6)) };
+      }
+      if (url.includes('query2.finance.yahoo.com')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(makeYahooPayload('TCS.NS', 6)) };
+      }
+      if (url.includes('data-api.binance.vision')) {
+        if (failBinanceDataApi) throw new Error('data-api down');
+        return { ok: true, status: 200, text: async () => JSON.stringify(makeBinanceRows()) };
+      }
+      if (url.includes('api.binance.com')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(makeBinanceRows()) };
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    }
+  });
+
+  // Unit path
+  const y1 = await svc.getKlines('RELIANCE.NS', '1d');
+  assert.equal(y1.meta.provider, 'yahoo:query1');
+
+  failYahooQuery1 = true;
+  const y2 = await svc.getKlines('TCS.NS', '1d');
+  assert.equal(y2.meta.provider, 'yahoo:query2');
+  const y2Cached = await svc.getKlines('TCS.NS', '1d');
+  assert.equal(y2Cached.meta.source, 'cache');
+  assert.equal(y2Cached.meta.provider, 'yahoo:query2', 'Cache hit must preserve concrete provider node');
+
+  const b1 = await svc.getKlines('BTCUSDT', '1d');
+  assert.equal(b1.meta.provider, 'binance:data-api');
+
+  failBinanceDataApi = true;
+  const b2 = await svc.getKlines('ETHUSDT', '1d');
+  assert.equal(b2.meta.provider, 'binance:api');
+
+  // HTTP path (/api/klines and /api/quote)
+  const srv = createAppServer({ marketService: svc });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address();
+  try {
+    const kHttp = await httpGetJson(port, '/api/klines?symbol=INFY.NS&interval=1d');
+    assert.equal(kHttp.status, 200);
+    assert.equal(kHttp.json.meta.provider, 'yahoo:query2');
+
+    const qHttp = await httpGetJson(port, '/api/quote?symbol=SOLUSDT&interval=1d');
+    assert.equal(qHttp.status, 200);
+    assert.equal(qHttp.json.meta.provider, 'binance:api');
+  } finally {
+    svc.klineCache.destroy();
+    svc.quoteCache.destroy();
+    svc.fundamentalsCache.destroy();
+    svc.simCache.destroy();
+    if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+
