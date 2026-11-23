@@ -325,3 +325,40 @@ test('0.7 Frontend XSS protection: sanitize.js escapes HTML/scripts and aiCopilo
   );
   assert.match(copilotJs, /reportPre\.textContent\s*=\s*cleanReportText/);
 });
+
+test('render.yaml and Dockerfile explicitly set HOST=0.0.0.0 for container and Render deployments', () => {
+  const renderYamlPath = path.join(__dirname, '..', 'render.yaml');
+  const dockerfilePath = path.join(__dirname, '..', 'Dockerfile');
+
+  const renderLines = fs.readFileSync(renderYamlPath, 'utf8').split(/\r?\n/);
+  const renderEnv = {};
+  for (let i = 0; i < renderLines.length; i++) {
+    const keyMatch = renderLines[i].match(/^\s*-\s*key:\s*(\S+)\s*$/);
+    if (keyMatch) {
+      const valMatch = (renderLines[i + 1] || '').match(/^\s*value:\s*["']?([^"'\s#]+)["']?\s*$/);
+      if (valMatch) {
+        renderEnv[keyMatch[1]] = valMatch[1];
+      }
+    }
+  }
+  assert.equal(renderEnv.HOST, '0.0.0.0', 'render.yaml envVars must define HOST=0.0.0.0');
+
+  const dockerLines = fs.readFileSync(dockerfilePath, 'utf8').split(/\r?\n/);
+  const dockerEnv = {};
+  for (const line of dockerLines) {
+    const m = line.match(/^\s*ENV\s+(.+)$/);
+    if (!m) continue;
+    for (const pair of m[1].trim().split(/\s+/)) {
+      const eq = pair.indexOf('=');
+      if (eq > 0) {
+        dockerEnv[pair.slice(0, eq)] = pair.slice(eq + 1).replace(/^["']|["']$/g, '');
+      }
+    }
+  }
+  assert.equal(dockerEnv.HOST, '0.0.0.0', 'Dockerfile must define ENV HOST=0.0.0.0');
+
+  const cfgFromDocker = getListenConfig(dockerEnv);
+  assert.equal(cfgFromDocker.host, '0.0.0.0');
+  assert.equal(cfgFromDocker.allowLocalLlm, false);
+});
+

@@ -6,6 +6,7 @@ COPY package.json server.js ./
 COPY server ./server
 COPY public ./public
 
+ENV HOST=0.0.0.0
 ENV PORT=3456
 EXPOSE 3456
 
