@@ -67,20 +67,32 @@ export function resolveExchangeTimezone(ctx = {}) {
   return { timeZone: 'Asia/Kolkata', tzAbbr: 'IST', market: 'in' };
 }
 
+const tzPartsFormatterCache = new Map();
+
+function getTzPartsFormatter(timeZone) {
+  if (!tzPartsFormatterCache.has(timeZone)) {
+    tzPartsFormatterCache.set(
+      timeZone,
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        weekday: 'short',
+        hour12: false
+      })
+    );
+  }
+  return tzPartsFormatterCache.get(timeZone);
+}
+
 export function extractTimeZoneParts(epochSec, timeZone = 'Asia/Kolkata') {
   const ms = Number(epochSec) * 1000;
   try {
-    const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      weekday: 'short',
-      hour12: false
-    }).formatToParts(new Date(ms));
+    const parts = getTzPartsFormatter(timeZone).formatToParts(new Date(ms));
 
     const map = {};
     for (const p of parts) {

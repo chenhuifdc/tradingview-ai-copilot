@@ -327,9 +327,9 @@ test('M2.9 (M2.1 Item 3) Normalized score (0..1), deterministic id generation, a
   const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures;
   const relianceCandles = fixtures['RELIANCE.NS'].candles;
 
-  const run1 = runPatternRuleEngine(relianceCandles);
-  const run2 = runPatternRuleEngine(relianceCandles);
-  const run3 = runPatternRuleEngine([...relianceCandles]);
+  const run1 = runPatternRuleEngine(relianceCandles, { useCache: false });
+  const run2 = runPatternRuleEngine(relianceCandles, { useCache: false });
+  const run3 = runPatternRuleEngine([...relianceCandles], { useCache: false });
 
   const categories = [
     (r) => r.supportResistance.supports,
@@ -526,15 +526,17 @@ test('M2.12 (M2.1 Item 5) Real NSE stock fixtures (RELIANCE.NS & TCS.NS) sanity 
 
   const payload = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
   const maxC = PATTERN_ENGINE_CONFIG.maxCandidates;
+  const expectedSymbols = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'SUNPHARMA.NS', 'ITC.NS'];
 
-  for (const symbol of ['RELIANCE.NS', 'TCS.NS']) {
+  for (const symbol of expectedSymbols) {
     const fix = payload.fixtures[symbol];
     assert.ok(fix && fix.candles.length >= 400, `${symbol} fixture must contain >= 400 real daily candles`);
 
     const out = runPatternRuleEngine(fix.candles, {
       interval: '1d',
       timeZone: 'Asia/Kolkata',
-      tickSize: 0.05
+      tickSize: 0.05,
+      useCache: false
     });
 
     assert.ok(
@@ -563,7 +565,7 @@ test('M2.12 (M2.1 Item 5) Real NSE stock fixtures (RELIANCE.NS & TCS.NS) sanity 
     );
   }
 
-  // 1500-bar performance benchmark constructed by concatenating / extending real daily movements
+  // 1500-bar raw compute performance benchmark (useCache: false!)
   const baseCandles = payload.fixtures['RELIANCE.NS'].candles;
   const candles1500 = [];
   const startEpochMs = Date.parse('2020-01-01T00:00:00Z');
@@ -580,14 +582,14 @@ test('M2.12 (M2.1 Item 5) Real NSE stock fixtures (RELIANCE.NS & TCS.NS) sanity 
     });
   }
 
-  // Warmup twice so V8 JIT stabilizes, then measure 5 runs and take the median
-  runPatternRuleEngine(candles1500);
-  runPatternRuleEngine(candles1500);
+  // Warmup twice so V8 JIT stabilizes, then measure 5 uncached runs and take the median
+  runPatternRuleEngine(candles1500, { useCache: false });
+  runPatternRuleEngine(candles1500, { useCache: false });
   const samples = [];
   let benchOut = null;
   for (let r = 0; r < 5; r++) {
     const t0 = performance.now();
-    benchOut = runPatternRuleEngine(candles1500);
+    benchOut = runPatternRuleEngine(candles1500, { useCache: false });
     samples.push(performance.now() - t0);
   }
   const sorted = [...samples].sort((a, b) => a - b);
@@ -605,3 +607,289 @@ test('M2.12 (M2.1 Item 5) Real NSE stock fixtures (RELIANCE.NS & TCS.NS) sanity 
     );
   }
 });
+
+test('M2.13 (M2.2 B) Recalibrated scores do not saturate across all 5 NSE fixtures, strictly separate supports/resistances by current price, and prioritize ATR-closer levels', async () => {
+  const { runPatternRuleEngine, detectSupportResistanceClusters } = await import('../public/js/patternEngine.js');
+  const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
+  const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures;
+  const symbols = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'SUNPHARMA.NS', 'ITC.NS'];
+
+  for (const sym of symbols) {
+    const out1 = runPatternRuleEngine(fixtures[sym].candles, { useCache: false });
+    const out2 = runPatternRuleEngine(fixtures[sym].candles, { useCache: false });
+    const latestClose = out1.candles[out1.candles.length - 1].close;
+
+    // 1) Determinism across repeated uncached runs
+    assert.deepEqual(
+      out1.supportResistance.supports.map((s) => ({ id: s.id, score: s.score })),
+      out2.supportResistance.supports.map((s) => ({ id: s.id, score: s.score })),
+      `${sym} supports sorting & scores must be deterministic`
+    );
+
+    // 2) Strict side partition: supports <= latestClose, resistances > latestClose
+    for (const s of out1.supportResistance.supports) {
+      assert.ok(s.price <= latestClose, `${sym} support ${s.price} must be <= current close ${latestClose}`);
+      assert.ok(Number.isFinite(s.distanceAtr) && s.distanceAtr >= 0);
+    }
+    for (const r of out1.supportResistance.resistances) {
+      assert.ok(r.price > latestClose, `${sym} resistance ${r.price} must be > current close ${latestClose}`);
+      assert.ok(Number.isFinite(r.distanceAtr) && r.distanceAtr >= 0);
+    }
+
+    // 3) Non-saturation & discrimination across ALL 6 candidate categories
+    const lists = {
+      supports: out1.supportResistance.supports,
+      resistances: out1.supportResistance.resistances,
+      trendlines: out1.trendlines,
+      boxRanges: out1.boxRanges,
+      divergences: out1.divergences,
+      patterns: out1.patterns
+    };
+
+    for (const [cat, list] of Object.entries(lists)) {
+      for (let i = 0; i < list.length; i++) {
+        assert.ok(list[i].score > 0 && list[i].score < 1, `${sym}.${cat}[${i}] score ${list[i].score} must strictly be in (0, 1) without clamping saturation`);
+        if (i > 0) {
+          assert.ok(list[i - 1].score >= list[i].score, `${sym}.${cat} must be sorted descending by score`);
+        }
+      }
+      if (list.length >= 2) {
+        const spread = list[0].score - list[list.length - 1].score;
+        assert.ok(spread > 0.005, `${sym}.${cat} scores must have meaningful spread (got ${spread.toFixed(4)})`);
+      }
+    }
+
+    // Top S&R levels must have strictly distinct scores (no bunching at a ceiling)
+    const supScores = new Set(out1.supportResistance.supports.map((x) => x.score));
+    assert.equal(supScores.size, out1.supportResistance.supports.length, `${sym} support scores must be distinct`);
+    const resScores = new Set(out1.supportResistance.resistances.map((x) => x.score));
+    assert.equal(resScores.size, out1.supportResistance.resistances.length, `${sym} resistance scores must be distinct`);
+  }
+
+  // 4) Controlled ATR-distance monotonicity test:
+  // Build two equal-touch, equal-recency swing lows below current price (one close ~1.5 ATR, one far ~12 ATR)
+  const baseCandles = Array.from({ length: 60 }, (_, i) => ({
+    time: 1710000000 + i * 86400,
+    open: 1000,
+    high: 1010,
+    low: 990,
+    close: 1000,
+    volume: 100000
+  }));
+  const controlledSwings = [
+    { index: 20, time: baseCandles[20].time, price: 760, polarity: 'low' },
+    { index: 40, time: baseCandles[40].time, price: 762, polarity: 'low' }, // far support (~12 ATR away, 2 touches)
+    { index: 21, time: baseCandles[21].time, price: 970, polarity: 'low' },
+    { index: 41, time: baseCandles[41].time, price: 972, polarity: 'low' } // near support (~1.5 ATR away, 2 touches)
+  ];
+  const sr = detectSupportResistanceClusters(baseCandles, { swings: controlledSwings, _alreadyNormalized: true });
+  const nearSup = sr.supports.find((c) => Math.abs(c.price - 971) < 10);
+  const farSup = sr.supports.find((c) => Math.abs(c.price - 761) < 10);
+  assert.ok(nearSup && farSup, 'Both near and far controlled supports must be clustered');
+  assert.ok(
+    nearSup.score > farSup.score,
+    `Near support (${nearSup.price}, dAtr=${nearSup.distanceAtr}, score=${nearSup.score}) must outrank far support (${farSup.price}, dAtr=${farSup.distanceAtr}, score=${farSup.score})`
+  );
+});
+
+test('M2.14 (M2.2 C) Data-version result cache hits on unchanged data and invalidates on candle mutation or dataVersion bump', async () => {
+  const {
+    runPatternRuleEngine,
+    getPatternEngineCacheStats,
+    clearPatternEngineCache
+  } = await import('../public/js/patternEngine.js');
+  const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
+  const relianceCandles = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures['RELIANCE.NS'].candles;
+
+  clearPatternEngineCache();
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 0, misses: 0, size: 0 });
+
+  const first = runPatternRuleEngine(relianceCandles, { dataVersion: 'v1' });
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 0, misses: 1, size: 1 });
+
+  const second = runPatternRuleEngine(relianceCandles, { dataVersion: 'v1' });
+  assert.equal(second, first, 'Cache hit on identical dataset & version must return cached result');
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 1, size: 1 });
+
+  // Mutating last bar close invalidates cache automatically even with same dataVersion
+  const mutated = relianceCandles.map((c, idx) =>
+    idx === relianceCandles.length - 1 ? { ...c, close: Number((c.close + 5).toFixed(2)) } : c
+  );
+  const third = runPatternRuleEngine(mutated, { dataVersion: 'v1' });
+  assert.notEqual(third, first);
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 2, size: 2 });
+
+  // Bumping dataVersion invalidates cache
+  const fourth = runPatternRuleEngine(relianceCandles, { dataVersion: 'v2' });
+  assert.notEqual(fourth, first);
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 3, size: 3 });
+
+  // Changing output-affecting options (e.g. maxLevels) invalidates cache
+  const fifth = runPatternRuleEngine(relianceCandles, { dataVersion: 'v1', maxLevels: 2 });
+  assert.notEqual(fifth, first);
+  assert.ok(fifth.supportResistance.supports.length <= 2);
+  assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 4, size: 4 });
+});
+
+test('M2.15 (M2.2 C) Real-time tick update path (lwcChartEngine.updateLiveCandle) never re-runs patternEngine', async () => {
+  const {
+    getPatternEngineCacheStats,
+    clearPatternEngineCache
+  } = await import('../public/js/patternEngine.js');
+
+  // Minimal mock DOM & LightweightCharts stub to exercise real ChartEngine.setData & updateLiveCandle
+  const makeStubSeries = () => {
+    let data = [];
+    return {
+      setData: (d) => { data = Array.isArray(d) ? [...d] : []; },
+      update: (bar) => {
+        if (data.length && data[data.length - 1].time === bar.time) data[data.length - 1] = bar;
+        else data.push(bar);
+      },
+      data: () => data,
+      applyOptions: () => {},
+      createPriceLine: () => ({}),
+      removePriceLine: () => {},
+      priceScale: () => ({ applyOptions: () => {}, setAutoScale: () => {}, width: () => 78 }),
+      priceToCoordinate: () => 100,
+      coordinateToPrice: () => 1350
+    };
+  };
+
+  const makeMockEl = (tag) => {
+    const el = {
+      tagName: String(tag).toUpperCase(),
+      id: '',
+      className: '',
+      style: {},
+      children: [],
+      parentElement: null,
+      width: 900,
+      height: 560,
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      setAttribute: () => {},
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 560 }),
+      getContext: () => ({
+        setTransform: () => {},
+        clearRect: () => {},
+        save: () => {},
+        restore: () => {},
+        beginPath: () => {},
+        moveTo: () => {},
+        lineTo: () => {},
+        stroke: () => {},
+        fillRect: () => {},
+        fillText: () => {},
+        measureText: () => ({ width: 20 }),
+        setLineDash: () => {}
+      }),
+      addEventListener: () => {},
+      querySelector: () => null,
+      insertBefore: (n) => { el.children.push(n); return n; },
+      appendChild: (n) => { el.children.push(n); return n; }
+    };
+    return el;
+  };
+
+  const prevWindow = globalThis.window;
+  const prevDoc = globalThis.document;
+  const prevRO = globalThis.ResizeObserver;
+
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  globalThis.document = {
+    createElement: (tag) => makeMockEl(tag)
+  };
+  globalThis.window = {
+    devicePixelRatio: 1,
+    LightweightCharts: {
+      ColorType: { Solid: 'solid' },
+      CrosshairMode: { Normal: 0 },
+      LineStyle: { Solid: 0, Dashed: 2 },
+      CandlestickSeries: 'Candlestick',
+      HistogramSeries: 'Histogram',
+      LineSeries: 'Line',
+      createChart: () => ({
+        addSeries: () => makeStubSeries(),
+        removeSeries: () => {},
+        applyOptions: () => {},
+        priceScale: () => ({ applyOptions: () => {}, setAutoScale: () => {}, width: () => 78 }),
+        paneSize: () => ({ width: 820, height: 530 }),
+        resize: () => {},
+        panes: () => [{ setStretchFactor: () => {} }, { setStretchFactor: () => {} }],
+        removePane: () => {},
+        timeScale: () => ({
+          fitContent: () => {},
+          setVisibleLogicalRange: () => {},
+          getVisibleLogicalRange: () => ({ from: 0, to: 50 }),
+          subscribeVisibleLogicalRangeChange: () => {},
+          subscribeSizeChange: () => {},
+          applyOptions: () => {},
+          height: () => 28,
+          timeToCoordinate: () => 200,
+          coordinateToLogical: () => 10,
+          logicalToCoordinate: () => 200
+        }),
+        subscribeCrosshairMove: () => {}
+      })
+    }
+  };
+
+  try {
+    const { ChartEngine } = await import('../public/js/lwcChartEngine.js');
+    const stage = makeMockEl('div');
+    const canvas = makeMockEl('canvas');
+    canvas.parentElement = stage;
+
+    const engine = new ChartEngine(canvas);
+    const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
+    const base = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures['RELIANCE.NS'].candles.slice(-80);
+
+    engine.setData({
+      candles: base,
+      events: [],
+      instrument: { symbol: 'RELIANCE.NS', market: 'in', exchange: 'NSE' },
+      interval: '1d'
+    });
+    const initialLen = engine.candles.length;
+
+    clearPatternEngineCache();
+
+    // Pump 20 monotonic live ticks through updateLiveCandle (16 same-bar updates + 4 new daily bars)
+    const last = engine.candles[engine.candles.length - 1];
+    let currentTime = last.time;
+    let expectedNewBars = 0;
+    let finalClose = last.close;
+    for (let t = 1; t <= 20; t++) {
+      if (t % 5 === 0) {
+        currentTime += 86400;
+        expectedNewBars += 1;
+      }
+      finalClose = Number((last.close + t * 0.25).toFixed(2));
+      engine.updateLiveCandle({
+        time: currentTime,
+        open: last.open,
+        high: last.high + t * 0.5,
+        low: last.low,
+        close: finalClose,
+        volume: last.volume + t * 1000
+      });
+    }
+
+    assert.equal(engine.candles.length, initialLen + expectedNewBars, 'updateLiveCandle must actually append new bars');
+    assert.equal(engine.candles[engine.candles.length - 1].close, finalClose, 'updateLiveCandle must update latest bar close');
+
+    const statsAfterTicks = getPatternEngineCacheStats();
+    assert.equal(statsAfterTicks.hits, 0, 'Live ticks must NOT query patternEngine');
+    assert.equal(statsAfterTicks.misses, 0, 'Live ticks must NOT compute patternEngine');
+
+    // Control check: explicitly invoking runPatternRuleEngine on updated candles DOES register a cache miss
+    const { runPatternRuleEngine } = await import('../public/js/patternEngine.js');
+    runPatternRuleEngine(engine.candles);
+    assert.equal(getPatternEngineCacheStats().misses, 1, 'Explicit patternEngine call must be observed by cache stats');
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.document = prevDoc;
+    globalThis.ResizeObserver = prevRO;
+  }
+});
+
