@@ -972,7 +972,8 @@ function createMarketService({
           }
           return fetchYahooKlines(keyInfo.symbol, keyInfo.interval, keyInfo.range);
         },
-        ttlMs
+        ttlMs,
+        maxStaleMs
       );
 
       return formatKlineOutput(loaded.value, {
@@ -1027,7 +1028,8 @@ function createMarketService({
           }
           return fetchYahooKlines(keyInfo.symbol, keyInfo.interval, keyInfo.range);
         },
-        ttlMs
+        ttlMs,
+        maxStaleMs
       );
 
       const formatted = formatKlineOutput(loaded.value, {

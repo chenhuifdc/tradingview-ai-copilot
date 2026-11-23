@@ -2,8 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const http = require('node:http');
 
-const { NodeCircuitBreaker } = require('../server/cache');
+const { createAppServer } = require('../server');
+const { LruTtlCache, NodeCircuitBreaker } = require('../server/cache');
 const {
   createMarketService,
   formatDateInTimezone,
@@ -294,3 +296,145 @@ test('2.7 Simulated mode blocks AI analysis by default unless chkDemoMode is ena
   assert.match(appJs, /demoMode/);
   assert.match(appJs, /当前为模拟数据：AI 分析默认已禁用/);
 });
+
+function httpGetJson(port, urlPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path: urlPath, method: 'GET', headers: { Connection: 'close' } },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('LruTtlCache periodic sweep preserves entries past ttl but within maxStaleMs (virtual clock)', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 1_711_000_000_000 });
+  const cache = new LruTtlCache({
+    maxEntries: 10,
+    defaultTtlMs: 10_000,
+    defaultMaxStaleMs: 300_000,
+    sweepIntervalMs: 15_000
+  });
+
+  try {
+    cache.set('k1', { v: 1 }, 10_000, 300_000);
+    // Advance 60s: past 10s TTL, triggers 4 periodic sweeps, still within 300s maxStaleMs
+    t.mock.timers.tick(60_000);
+
+    assert.equal(cache.get('k1'), undefined, 'Expired entry must not be returned as fresh');
+    const staleHit = cache.getEntry('k1', { allowStale: true, maxStaleMs: 300_000 });
+    assert.ok(staleHit, 'Periodic sweep must NOT delete entry past TTL while still within maxStaleMs');
+    assert.equal(staleHit.stale, true);
+    assert.deepEqual(staleHit.value, { v: 1 });
+  } finally {
+    if (typeof cache.destroy === 'function') cache.destroy();
+    else if (cache.sweepTimer) clearInterval(cache.sweepTimer);
+  }
+});
+
+test('LruTtlCache full-capacity set() preserves stale-within-maxStaleMs entries while pruning entries past maxStaleMs', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_711_000_000_000 });
+  const cache = new LruTtlCache({
+    maxEntries: 3,
+    defaultTtlMs: 10_000,
+    defaultMaxStaleMs: 300_000
+  });
+
+  cache.set('stale_ok', { v: 'keep' }, 10_000, 300_000);
+  cache.set('too_old', { v: 'drop' }, 10_000, 20_000);
+  cache.set('fresh', { v: 'fresh' }, 100_000, 300_000);
+
+  // Advance 30s: stale_ok is past TTL (10s) but within maxStaleMs (300s); too_old is past maxStaleMs (20s)
+  t.mock.timers.tick(30_000);
+
+  cache.set('new_item', { v: 'new' }, 100_000, 300_000);
+
+  assert.equal(cache.size, 3);
+  assert.equal(cache.getEntry('too_old', { allowStale: true, maxStaleMs: 20_000 }), null, 'Entry beyond maxStaleMs must be purged on capacity set()');
+  const retained = cache.getEntry('stale_ok', { allowStale: true, maxStaleMs: 300_000 });
+  assert.ok(retained, 'Full-capacity set() must preserve entry still within maxStaleMs');
+  assert.equal(retained.stale, true);
+  assert.deepEqual(retained.value, { v: 'keep' });
+  assert.deepEqual(cache.get('fresh'), { v: 'fresh' });
+  assert.deepEqual(cache.get('new_item'), { v: 'new' });
+});
+
+test('LruTtlCache purges entries once age exceeds maxStaleMs during periodic sweep', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 1_711_000_000_000 });
+  const cache = new LruTtlCache({
+    maxEntries: 10,
+    defaultTtlMs: 10_000,
+    defaultMaxStaleMs: 60_000,
+    sweepIntervalMs: 15_000
+  });
+
+  try {
+    cache.set('k1', { v: 1 }, 10_000, 60_000);
+    t.mock.timers.tick(45_000);
+    assert.equal(cache.size, 1, 'Entry must remain retained before maxStaleMs expires');
+
+    // Advance past 60s maxStaleMs (total 75s) -> periodic sweep must delete it
+    t.mock.timers.tick(30_000);
+    assert.equal(cache.size, 0, 'Periodic sweep must purge entry after exceeding maxStaleMs');
+    assert.equal(cache.getEntry('k1', { allowStale: true, maxStaleMs: 60_000 }), null);
+  } finally {
+    if (typeof cache.destroy === 'function') cache.destroy();
+    else if (cache.sweepTimer) clearInterval(cache.sweepTimer);
+  }
+});
+
+test('HTTP /api/klines returns source=cache and stale=true after TTL + periodic sweeps when upstream fails within maxStaleMs', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.parse('2026-03-20T10:05:00Z') });
+  let upstreamDown = false;
+  const fridayCloseSec = Math.floor(Date.parse('2026-03-20T10:00:00Z') / 1000);
+
+  const svc = createMarketService({
+    sleepFn: async () => {},
+    resilienceConfig: { retry: { maxRetriesPerNode: 0 } },
+    fetchFn: async () => {
+      if (upstreamDown) throw new Error('Upstream unavailable');
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(makeYahooPayload('RELIANCE.NS', 6, fridayCloseSec - 5 * 86400))
+      };
+    }
+  });
+
+  const srv = createAppServer({ marketService: svc });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address();
+
+  try {
+    const r1 = await httpGetJson(port, '/api/klines?symbol=RELIANCE.NS&interval=1d');
+    assert.equal(r1.status, 200);
+    assert.equal(r1.json.meta.source, 'live');
+    assert.equal(r1.json.meta.stale, false);
+
+    // Advance 15 minutes (past 10m TTL, fires 15x 60s periodic sweeps, within 4-day maxStaleMs)
+    t.mock.timers.tick(15 * 60 * 1000);
+    upstreamDown = true;
+
+    const r2 = await httpGetJson(port, '/api/klines?symbol=RELIANCE.NS&interval=1d');
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.source, 'cache', 'HTTP /api/klines must degrade to stale cache instead of simulated');
+    assert.equal(r2.json.meta.source, 'cache');
+    assert.equal(r2.json.meta.stale, true);
+    assert.ok(r2.json.meta.ageMs >= 15 * 60 * 1000);
+  } finally {
+    if (typeof svc.klineCache?.cache?.destroy === 'function') svc.klineCache.cache.destroy();
+    if (typeof svc.quoteCache?.cache?.destroy === 'function') svc.quoteCache.cache.destroy();
+    if (typeof svc.fundamentalsCache?.cache?.destroy === 'function') svc.fundamentalsCache.cache.destroy();
+    if (typeof svc.simCache?.destroy === 'function') svc.simCache.destroy();
+    if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  }
+});
+

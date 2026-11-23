@@ -4,9 +4,16 @@
  */
 
 class LruTtlCache {
-  constructor({ maxEntries = 200, defaultTtlMs = 60000, nowFn = () => Date.now(), sweepIntervalMs = 0 } = {}) {
+  constructor({
+    maxEntries = 200,
+    defaultTtlMs = 60000,
+    defaultMaxStaleMs = 0,
+    nowFn = () => Date.now(),
+    sweepIntervalMs = 0
+  } = {}) {
     this.maxEntries = Math.max(1, Number(maxEntries) || 200);
     this.defaultTtlMs = Math.max(1, Number(defaultTtlMs) || 60000);
+    this.defaultMaxStaleMs = Math.max(0, Number(defaultMaxStaleMs) || 0);
     this.nowFn = nowFn;
     this.store = new Map();
     this.sweepTimer = null;
@@ -16,6 +23,13 @@ class LruTtlCache {
       if (typeof this.sweepTimer.unref === 'function') {
         this.sweepTimer.unref();
       }
+    }
+  }
+
+  destroy() {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
     }
   }
 
@@ -64,9 +78,10 @@ class LruTtlCache {
     return hit ? hit.value : undefined;
   }
 
-  set(key, value, ttlMs = this.defaultTtlMs) {
+  set(key, value, ttlMs = this.defaultTtlMs, maxStaleMs = this.defaultMaxStaleMs) {
     const now = this.nowFn();
     const effectiveTtl = Math.max(1, Number(ttlMs) || this.defaultTtlMs);
+    const effectiveMaxStale = Math.max(0, Number(maxStaleMs) || 0);
 
     if (this.store.has(key)) {
       this.store.delete(key);
@@ -79,10 +94,13 @@ class LruTtlCache {
       }
     }
 
+    const expiresAt = now + effectiveTtl;
+    const retainUntil = Math.max(expiresAt, now + effectiveMaxStale);
     const entry = {
       value,
       createdAt: now,
-      expiresAt: now + effectiveTtl
+      expiresAt,
+      retainUntil
     };
     this.store.set(key, entry);
     return value;
@@ -100,9 +118,10 @@ class LruTtlCache {
     const now = this.nowFn();
     let removed = 0;
     for (const [k, entry] of this.store.entries()) {
+      const entryRetain = Number.isFinite(entry.retainUntil) ? entry.retainUntil : entry.expiresAt;
       const deadline = maxRetentionMs > 0
-        ? Math.max(entry.expiresAt, entry.createdAt + maxRetentionMs)
-        : entry.expiresAt;
+        ? Math.max(entryRetain, entry.createdAt + maxRetentionMs)
+        : entryRetain;
       if (now > deadline) {
         this.store.delete(k);
         removed += 1;
@@ -159,15 +178,19 @@ class CoalescingLruCache {
     return this.cache.getEntry(key, opts);
   }
 
-  set(key, value, ttlMs) {
-    return this.cache.set(key, value, ttlMs);
+  set(key, value, ttlMs, maxStaleMs) {
+    return this.cache.set(key, value, ttlMs, maxStaleMs);
   }
 
   clear() {
     this.cache.clear();
   }
 
-  async getOrLoad(key, loaderFn, ttlMs) {
+  destroy() {
+    this.cache.destroy();
+  }
+
+  async getOrLoad(key, loaderFn, ttlMs, maxStaleMs) {
     const cached = this.cache.getEntry(key, { allowStale: false });
     if (cached) {
       return {
@@ -182,7 +205,7 @@ class CoalescingLruCache {
 
     const { value, shared } = await this.singleFlight.do(key, async () => {
       const fresh = await loaderFn();
-      this.cache.set(key, fresh, ttlMs);
+      this.cache.set(key, fresh, ttlMs, maxStaleMs);
       return fresh;
     });
 
