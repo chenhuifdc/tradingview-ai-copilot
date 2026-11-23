@@ -644,7 +644,282 @@ function createMarketService({
     if (!q || q.length < 1) {
       return { results: localMatches, remoteOnline: true };
     }
-    return { results: localMatches.slice(0, 30), remoteOnline: true };
+
+    let remoteResults = [];
+    let remoteOnline = false;
+
+    const hasCJK = /[\u4e00-\u9fff]/.test(q);
+    const hasHangul = /[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]/.test(q);
+    const looksLikeCnOrKrCode = /^\d{5,6}$/.test(q);
+
+    const mapYahooQuote = (item) => {
+      const sym = item.symbol;
+      const mkt = inferMarket(item.exchange, sym);
+      const typeMap = {
+        EQUITY: mkt === 'kr' ? '韩股' : mkt === 'in' ? '印股' : '股票',
+        ETF: 'ETF',
+        INDEX: '指数',
+        CRYPTOCURRENCY: '加密货币',
+        CURRENCY: '外汇',
+        FUTURE: '期货'
+      };
+      const currencyMap = { in: 'INR', kr: 'KRW', hk: 'HKD', cn: 'CNY', us: 'USD' };
+      return {
+        symbol: sym,
+        displaySymbol: cleanDisplaySymbol(sym),
+        name: item.shortname || item.longname || sym,
+        enName: item.longname || item.shortname || sym,
+        exchange: normalizeExchangeName(item.exchDisp || item.exchange, sym),
+        market: mkt,
+        type: typeMap[item.quoteType] || '证券',
+        currency: currencyMap[mkt] || '',
+        provider: sym.endsWith('-USD') ? 'yahoo' : inferProvider(sym)
+      };
+    };
+
+    // 1) Yahoo Finance global search (routed through executeWithResilience for timeout, retry, failover, and circuit breaker)
+    const yahooPromise = (async () => {
+      if (hasCJK || hasHangul) return [];
+      const queries = [q];
+      if (market === 'in' && /^[A-Za-z0-9&-]{2,15}$/.test(q) && !q.includes('.')) {
+        queries.push(`${q}.NS`);
+      }
+      const batches = await Promise.allSettled(
+        queries.map((term) =>
+          executeWithResilience(
+            'yahoo',
+            (node) =>
+              `${node.baseUrl}/v1/finance/search?q=${encodeURIComponent(term)}&quotesCount=14&newsCount=0&enableFuzzyQuery=true`,
+            (data) => ({ quotes: Array.isArray(data?.quotes) ? data.quotes : [] }),
+            resCfg.timeoutMs.search
+          )
+        )
+      );
+      const anyFulfilled = batches.some((b) => b.status === 'fulfilled');
+      if (!anyFulfilled) {
+        const firstErr = batches.find((b) => b.status === 'rejected')?.reason;
+        throw firstErr || new Error('Yahoo search unavailable');
+      }
+      const out = [];
+      for (const res of batches) {
+        if (res.status !== 'fulfilled') continue;
+        for (const item of res.value.quotes) {
+          if (item && item.symbol && item.quoteType !== 'OPTION') {
+            out.push(mapYahooQuote(item));
+          }
+        }
+      }
+      return out;
+    })();
+
+    // 2) Naver Finance Korean stock search (KOSPI & KOSDAQ)
+    const naverPromise = (async () => {
+      const shouldQueryNaver =
+        hasHangul ||
+        market === 'kr' ||
+        (looksLikeCnOrKrCode && (market === 'all' || market === 'kr'));
+      if (!shouldQueryNaver || hasCJK) return [];
+      const url = `https://ac.stock.naver.com/ac?q=${encodeURIComponent(q)}&target=stock`;
+      const data = await fetchJsonWithTimeout(url, {}, resCfg.timeoutMs.search);
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const mapped = [];
+      for (const it of items) {
+        if (!it || it.nationCode !== 'KOR') continue;
+        const code = String(it.code || '').trim().toUpperCase();
+        const exType = String(it.typeCode || '').toUpperCase();
+        if (!/^[A-Z0-9]{6}$/.test(code)) continue;
+        if (exType !== 'KOSPI' && exType !== 'KOSDAQ') continue;
+        const suffix = exType === 'KOSDAQ' ? '.KQ' : '.KS';
+        mapped.push({
+          symbol: `${code}${suffix}`,
+          displaySymbol: code,
+          name: it.name || code,
+          enName: `${it.name} (${exType})`,
+          koName: it.name || code,
+          exchange: exType,
+          market: 'kr',
+          type: '韩股',
+          currency: 'KRW',
+          provider: 'yahoo'
+        });
+      }
+      return mapped;
+    })();
+
+    // 3) Eastmoney Chinese stock search (A-shares, HK, US Chinese names)
+    const eastmoneyPromise = (async () => {
+      if ((!hasCJK && !looksLikeCnOrKrCode) || market === 'in' || market === 'kr') return [];
+      const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(q)}&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=10`;
+      const data = await fetchJsonWithTimeout(url, {}, resCfg.timeoutMs.search);
+      const rows = Array.isArray(data?.QuotationCodeTable?.Data) ? data.QuotationCodeTable.Data : [];
+      const mapped = [];
+      for (const r of rows) {
+        const code = String(r.Code || '').trim();
+        if (!code) continue;
+        if (r.Classify === 'AStock') {
+          const isSH = String(r.MktNum) === '1' || code.startsWith('6');
+          const suffix = isSH ? '.SS' : '.SZ';
+          mapped.push({
+            symbol: `${code}${suffix}`,
+            displaySymbol: code,
+            name: r.Name || code,
+            enName: `${r.Name} (${r.PinYin || code})`,
+            exchange: isSH ? 'SSE' : 'SZSE',
+            market: 'cn',
+            type: 'A股',
+            currency: 'CNY',
+            provider: 'yahoo'
+          });
+        } else if (r.Classify === 'HK' && /^\d{4,5}$/.test(code)) {
+          const hk4 = code.length === 5 && code.startsWith('0') ? code.slice(1) : code.padStart(4, '0');
+          mapped.push({
+            symbol: `${hk4}.HK`,
+            displaySymbol: `${hk4}.HK`,
+            name: r.Name || hk4,
+            enName: `${r.Name} (HKEX)`,
+            exchange: 'HKEX',
+            market: 'hk',
+            type: '港股',
+            currency: 'HKD',
+            provider: 'yahoo'
+          });
+        } else if (r.Classify === 'UsStock' && /^[A-Za-z.]{1,8}$/.test(code)) {
+          mapped.push({
+            symbol: code.toUpperCase(),
+            displaySymbol: code.toUpperCase(),
+            name: r.Name || code.toUpperCase(),
+            enName: r.Name || code.toUpperCase(),
+            exchange: r.JYS || 'US',
+            market: 'us',
+            type: '美股',
+            currency: 'USD',
+            provider: 'yahoo'
+          });
+        }
+      }
+      return mapped;
+    })();
+
+    const [yahooRes, naverRes, emRes] = await Promise.allSettled([yahooPromise, naverPromise, eastmoneyPromise]);
+    if (yahooRes.status === 'fulfilled' && yahooRes.value.length) {
+      remoteOnline = true;
+      remoteResults.push(...yahooRes.value);
+    } else if (yahooRes.status === 'fulfilled' && !hasCJK && !hasHangul) {
+      remoteOnline = true;
+    }
+    if (naverRes.status === 'fulfilled' && naverRes.value.length) {
+      remoteOnline = true;
+      remoteResults.push(...naverRes.value);
+    } else if (naverRes.status === 'fulfilled' && (hasHangul || market === 'kr')) {
+      remoteOnline = true;
+    }
+    if (emRes.status === 'fulfilled' && emRes.value.length) {
+      remoteOnline = true;
+      remoteResults.push(...emRes.value);
+    } else if (emRes.status === 'fulfilled' && (hasCJK || looksLikeCnOrKrCode)) {
+      remoteOnline = true;
+    }
+
+    // Synthesize Binance crypto pair candidate when query looks like ASCII ticker
+    const upperQ = q.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if ((market === 'all' || market === 'crypto') && upperQ.length >= 2 && upperQ.length <= 12) {
+      const candidateSym = upperQ.endsWith('USDT') ? upperQ : `${upperQ}USDT`;
+      const alreadyExists = localMatches.some((i) => i.symbol.toUpperCase() === candidateSym);
+      if (!alreadyExists && /^[A-Z0-9]+USDT$/.test(candidateSym) && upperQ.length <= 10 && /^[a-zA-Z0-9/]+$/.test(q)) {
+        remoteResults.push({
+          symbol: candidateSym,
+          displaySymbol: candidateSym.replace('USDT', '/USDT'),
+          name: `${candidateSym.replace('USDT', '')} / TetherUS`,
+          enName: `${candidateSym.replace('USDT', '')} / USDT`,
+          exchange: 'BINANCE',
+          market: 'crypto',
+          type: '加密货币',
+          currency: 'USDT',
+          provider: 'binance'
+        });
+      }
+    }
+
+    // Merge and deduplicate (local catalog items first)
+    const seen = new Set();
+    const merged = [];
+    for (const item of [...localMatches, ...remoteResults]) {
+      const key = item.symbol.toUpperCase();
+      if (seen.has(key)) continue;
+      if (market !== 'all' && item.market !== market) continue;
+      seen.add(key);
+      merged.push(item);
+    }
+
+    // Direct symbol fallback candidates for India NSE/BSE, Korea KOSPI/KOSDAQ, or generic tickers
+    if (merged.length === 0 && market === 'in' && /^[A-Za-z0-9&-]{2,15}$/.test(q)) {
+      const rawIn = q.toUpperCase().replace(/\.(NS|BO)$/i, '');
+      merged.push(
+        {
+          symbol: `${rawIn}.NS`,
+          displaySymbol: rawIn,
+          name: `${rawIn} (NSE 印度直连)`,
+          enName: `${rawIn} (NSE India)`,
+          exchange: 'NSE',
+          market: 'in',
+          type: '印股',
+          currency: 'INR',
+          provider: 'yahoo'
+        },
+        {
+          symbol: `${rawIn}.BO`,
+          displaySymbol: rawIn,
+          name: `${rawIn} (BSE 孟买直连)`,
+          enName: `${rawIn} (BSE India)`,
+          exchange: 'BSE',
+          market: 'in',
+          type: '印股',
+          currency: 'INR',
+          provider: 'yahoo'
+        }
+      );
+    } else if (merged.length === 0 && market === 'kr' && /^\d{6}$/.test(q)) {
+      merged.push(
+        {
+          symbol: `${q}.KS`,
+          displaySymbol: q,
+          name: `${q} (KOSPI 韩国主板)`,
+          enName: `${q} (KOSPI)`,
+          exchange: 'KOSPI',
+          market: 'kr',
+          type: '韩股',
+          currency: 'KRW',
+          provider: 'yahoo'
+        },
+        {
+          symbol: `${q}.KQ`,
+          displaySymbol: q,
+          name: `${q} (KOSDAQ 韩国创业板)`,
+          enName: `${q} (KOSDAQ)`,
+          exchange: 'KOSDAQ',
+          market: 'kr',
+          type: '韩股',
+          currency: 'KRW',
+          provider: 'yahoo'
+        }
+      );
+    } else if (merged.length === 0 && /^[A-Za-z0-9.^=-]{1,15}$/.test(q)) {
+      const rawSym = q.toUpperCase();
+      const inferredMkt = inferMarket('', rawSym);
+      merged.push({
+        symbol: rawSym,
+        displaySymbol: cleanDisplaySymbol(rawSym),
+        name: `${rawSym} (直接加载代码)`,
+        enName: rawSym,
+        exchange: normalizeExchangeName('', rawSym),
+        market: inferredMkt,
+        type: inferredMkt === 'kr' ? '韩股' : inferredMkt === 'in' ? '印股' : '股票',
+        currency: inferredMkt === 'kr' ? 'KRW' : inferredMkt === 'in' ? 'INR' : 'USD',
+        provider: inferProvider(rawSym)
+      });
+    }
+
+    return { results: merged.slice(0, 30), remoteOnline };
   }
 
   async function fetchBinanceKlines(symbol, interval, limit = 1000) {
@@ -1112,46 +1387,260 @@ function createMarketService({
 
   async function getStockFundamentals(symbol) {
     const normSymbol = normalizeSymbol(symbol);
-    const klineData = await getKlines(normSymbol, '1d');
-    const candles = klineData.candles || [];
-    const closes = candles.map((c) => c.close);
-    const last = candles[candles.length - 1];
-    const prev = candles[candles.length - 2] || last;
-    const recent252 = candles.slice(-252);
-    const high52w = recent252.length ? Math.max(...recent252.map((c) => c.high)) : null;
-    const low52w = recent252.length ? Math.min(...recent252.map((c) => c.low)) : null;
+    const cacheKey = `fundamentals::${normSymbol}`;
+    const ttlMs = cfg.ttlMs.fundamentals;
+    const maxStaleMs = cfg.maxStaleMs['1d'];
 
-    return {
-      symbol: klineData.instrument.symbol,
-      displaySymbol: klineData.instrument.displaySymbol,
-      name: klineData.instrument.name,
-      enName: klineData.instrument.enName,
-      exchange: klineData.instrument.exchange,
-      market: klineData.instrument.market,
-      currency: klineData.instrument.currency,
-      sector: '',
-      industry: '',
-      latestDate: klineData.meta?.latestTradingDay || '',
-      latestPrice: last?.close ?? null,
-      dailyChangePct: last && prev && prev.close ? Number((((last.close - prev.close) / prev.close) * 100).toFixed(2)) : 0,
-      high52w,
-      low52w,
-      dailySR: computeDailySupplyDemandZones(candles),
-      dailyMA: {
-        ema5: calcSimpleEmaLast(closes, 5),
-        ema10: calcSimpleEmaLast(closes, 10),
-        ema20: calcSimpleEmaLast(closes, 20),
-        ema50: calcSimpleEmaLast(closes, 50),
-        ema200: calcSimpleEmaLast(closes, 200),
-        ma5: calcSimpleSmaLast(closes, 5),
-        ma10: calcSimpleSmaLast(closes, 10),
-        ma20: calcSimpleSmaLast(closes, 20),
-        ma50: calcSimpleSmaLast(closes, 50),
-        ma200: calcSimpleSmaLast(closes, 200)
-      },
-      headlines: [],
-      meta: klineData.meta
+    const catalog = findCatalogItem(normSymbol);
+    const baseMarket = catalog?.market || inferMarket('', normSymbol);
+    const displayName = catalog?.name || cleanDisplaySymbol(normSymbol);
+    const baseEnName = catalog?.enName || cleanDisplaySymbol(normSymbol);
+    const baseExchange = catalog?.exchange || normalizeExchangeName('', normSymbol);
+
+    const buildFundamentalsPayload = async () => {
+      // 1) Yahoo Search quote metadata (sector, industry, longname, timestamped Yahoo news) via resilience & circuit breaker
+      const yahooMetaPromise = executeWithResilience(
+        'yahoo',
+        (node) => `${node.baseUrl}/v1/finance/search?q=${encodeURIComponent(normSymbol)}&quotesCount=3&newsCount=5`,
+        (j) => {
+          const quote =
+            (j?.quotes || []).find((q) => (q.symbol || '').toUpperCase() === normSymbol.toUpperCase()) ||
+            j?.quotes?.[0] ||
+            {};
+          const news = (j?.news || [])
+            .slice(0, 5)
+            .map((n) => {
+              const pubMs = Number.isFinite(n.providerPublishTime) ? n.providerPublishTime * 1000 : null;
+              const iso = pubMs ? new Date(pubMs).toISOString() : '';
+              return {
+                title: decodeXmlEntities(n.title || ''),
+                pubDate: iso ? iso.slice(0, 10) : '',
+                publishedAt: iso,
+                source: 'yahoo'
+              };
+            })
+            .filter((n) => n.title);
+          return {
+            longName: quote.longname || quote.shortname || baseEnName,
+            sector: quote.sectorDisp || quote.sector || '',
+            industry: quote.industryDisp || quote.industry || '',
+            news
+          };
+        },
+        resCfg.timeoutMs.fundamentals
+      );
+
+      // 2) Google News RSS for latest corporate & market news headlines with timestamps
+      const gnewsPromise = (async () => {
+        const queryBase =
+          baseMarket === 'in'
+            ? `${baseEnName} ${baseExchange} stock`
+            : `${baseEnName} ${cleanDisplaySymbol(normSymbol)} stock`;
+        const localeParams =
+          baseMarket === 'in'
+            ? 'hl=en-IN&gl=IN&ceid=IN:en'
+            : 'hl=en-US&gl=US&ceid=US:en';
+        const url = `https://news.google.com/rss/search?q=${encodeURIComponent(queryBase)}&${localeParams}`;
+        const xml = await fetchTextWithTimeout(
+          url,
+          { headers: { Accept: 'application/rss+xml, application/xml, text/xml' } },
+          resCfg.timeoutMs.fundamentals
+        );
+        const items = [];
+        const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
+        for (const m of itemMatches) {
+          const block = m[1];
+          const titleMatch = block.match(/<title>([\s\S]*?)<\/title>/);
+          const dateMatch = block.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+          if (!titleMatch) continue;
+          const rawTitle = decodeXmlEntities(titleMatch[1]).replace(/\s+-\s+[^-]+$/, '').trim();
+          if (!rawTitle) continue;
+          let pubDate = '';
+          let publishedAt = '';
+          if (dateMatch) {
+            const d = new Date(decodeXmlEntities(dateMatch[1]));
+            if (!Number.isNaN(d.getTime())) {
+              publishedAt = d.toISOString();
+              pubDate = publishedAt.slice(0, 10);
+            }
+          }
+          items.push({ title: rawTitle, pubDate, publishedAt, source: 'google_news' });
+          if (items.length >= 5) break;
+        }
+        return items;
+      })();
+
+      // 3) Daily (1d) candle snapshot via getKlines (reuses klineCache, NSE->BSE fallback, and meta)
+      const dailyPromise = getKlines(normSymbol, '1d');
+
+      const [yRes, gRes, dRes] = await Promise.allSettled([yahooMetaPromise, gnewsPromise, dailyPromise]);
+      const yMeta =
+        yRes.status === 'fulfilled'
+          ? yRes.value
+          : { longName: baseEnName, sector: '', industry: '', news: [] };
+      const gNews = gRes.status === 'fulfilled' ? gRes.value : [];
+      const klineData = dRes.status === 'fulfilled' ? dRes.value : null;
+
+      // If all upstream sources failed (including klines falling back to simulated), throw so caller can degrade to stale fundamentals cache
+      if (
+        yRes.status === 'rejected' &&
+        gRes.status === 'rejected' &&
+        (!klineData || klineData.meta?.source === 'simulated')
+      ) {
+        const err = new Error('All fundamentals upstream sources failed');
+        err.fallbackKlineData = klineData;
+        throw err;
+      }
+
+      const candles = klineData?.candles || [];
+      const closes = candles.map((c) => c.close);
+      const last = candles[candles.length - 1];
+      const prev = candles[candles.length - 2] || last;
+      const recent252 = candles.slice(-252);
+      const high52w = recent252.length ? Math.max(...recent252.map((c) => c.high)) : null;
+      const low52w = recent252.length ? Math.min(...recent252.map((c) => c.low)) : null;
+
+      const seenTitle = new Set();
+      const headlines = [];
+      for (const h of [...gNews, ...(yMeta.news || [])]) {
+        const key = (h.title || '').toLowerCase().slice(0, 48);
+        if (!key || seenTitle.has(key)) continue;
+        seenTitle.add(key);
+        headlines.push(h);
+        if (headlines.length >= 5) break;
+      }
+
+      const inst = klineData?.instrument || {
+        symbol: normSymbol,
+        displaySymbol: catalog?.displaySymbol || cleanDisplaySymbol(normSymbol),
+        name: displayName,
+        enName: baseEnName,
+        exchange: baseExchange,
+        market: baseMarket,
+        currency: catalog?.currency || (baseMarket === 'in' ? 'INR' : baseMarket === 'kr' ? 'KRW' : 'USD')
+      };
+
+      return {
+        symbol: inst.symbol,
+        displaySymbol: inst.displaySymbol,
+        name: inst.name,
+        enName: yMeta.longName || inst.enName || baseEnName,
+        exchange: inst.exchange,
+        market: inst.market,
+        currency: inst.currency,
+        sector: yMeta.sector || '',
+        industry: yMeta.industry || '',
+        latestDate: klineData?.meta?.latestTradingDay || '',
+        latestPrice: last?.close ?? null,
+        dailyChangePct:
+          last && prev && prev.close ? Number((((last.close - prev.close) / prev.close) * 100).toFixed(2)) : 0,
+        high52w,
+        low52w,
+        dailySR: computeDailySupplyDemandZones(candles),
+        dailyMA: {
+          ema5: calcSimpleEmaLast(closes, 5),
+          ema10: calcSimpleEmaLast(closes, 10),
+          ema20: calcSimpleEmaLast(closes, 20),
+          ema50: calcSimpleEmaLast(closes, 50),
+          ema200: calcSimpleEmaLast(closes, 200),
+          ma5: calcSimpleSmaLast(closes, 5),
+          ma10: calcSimpleSmaLast(closes, 10),
+          ma20: calcSimpleSmaLast(closes, 20),
+          ma50: calcSimpleSmaLast(closes, 50),
+          ma200: calcSimpleSmaLast(closes, 200)
+        },
+        headlines,
+        meta: klineData?.meta || buildResponseMeta({
+          source: 'live',
+          fetchedAt: nowFn(),
+          now: nowFn(),
+          stale: false,
+          provider: yMeta.providerNode || 'yahoo:query1',
+          latestBarTime: last?.time ?? null,
+          market: baseMarket,
+          resolvedSymbol: normSymbol,
+          exchange: baseExchange
+        })
+      };
     };
+
+    try {
+      const loaded = await fundamentalsCache.getOrLoad(cacheKey, buildFundamentalsPayload, ttlMs, maxStaleMs);
+      if (loaded.fromCache) {
+        return {
+          ...loaded.value,
+          cacheHit: true,
+          meta: {
+            ...loaded.value.meta,
+            source: 'cache',
+            stale: false,
+            fetchedAt: loaded.createdAt,
+            ageMs: loaded.ageMs
+          }
+        };
+      }
+      return {
+        ...loaded.value,
+        cacheHit: false
+      };
+    } catch (err) {
+      // Tier 2 degradation: stale fundamentals cache within maxStaleMs
+      const staleHit = fundamentalsCache.getEntry(cacheKey, { allowStale: true, maxStaleMs });
+      if (staleHit) {
+        return {
+          ...staleHit.value,
+          cacheHit: true,
+          meta: {
+            ...staleHit.value.meta,
+            source: 'cache',
+            stale: true,
+            fetchedAt: staleHit.createdAt,
+            ageMs: staleHit.ageMs
+          }
+        };
+      }
+
+      // Tier 3 final fallback: simulated-backed fundamentals snapshot
+      const klineData = err?.fallbackKlineData || (await getKlines(normSymbol, '1d'));
+      const candles = klineData.candles || [];
+      const closes = candles.map((c) => c.close);
+      const last = candles[candles.length - 1];
+      const prev = candles[candles.length - 2] || last;
+      const recent252 = candles.slice(-252);
+      return {
+        symbol: klineData.instrument.symbol,
+        displaySymbol: klineData.instrument.displaySymbol,
+        name: klineData.instrument.name,
+        enName: klineData.instrument.enName,
+        exchange: klineData.instrument.exchange,
+        market: klineData.instrument.market,
+        currency: klineData.instrument.currency,
+        sector: '',
+        industry: '',
+        latestDate: klineData.meta?.latestTradingDay || '',
+        latestPrice: last?.close ?? null,
+        dailyChangePct:
+          last && prev && prev.close ? Number((((last.close - prev.close) / prev.close) * 100).toFixed(2)) : 0,
+        high52w: recent252.length ? Math.max(...recent252.map((c) => c.high)) : null,
+        low52w: recent252.length ? Math.min(...recent252.map((c) => c.low)) : null,
+        dailySR: computeDailySupplyDemandZones(candles),
+        dailyMA: {
+          ema5: calcSimpleEmaLast(closes, 5),
+          ema10: calcSimpleEmaLast(closes, 10),
+          ema20: calcSimpleEmaLast(closes, 20),
+          ema50: calcSimpleEmaLast(closes, 50),
+          ema200: calcSimpleEmaLast(closes, 200),
+          ma5: calcSimpleSmaLast(closes, 5),
+          ma10: calcSimpleSmaLast(closes, 10),
+          ma20: calcSimpleSmaLast(closes, 20),
+          ma50: calcSimpleSmaLast(closes, 50),
+          ma200: calcSimpleSmaLast(closes, 200)
+        },
+        headlines: [],
+        cacheHit: false,
+        meta: klineData.meta
+      };
+    }
   }
 
   return {
