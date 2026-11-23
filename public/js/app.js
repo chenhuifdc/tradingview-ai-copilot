@@ -13,6 +13,7 @@ import { ScreenshotStudio } from './screenshotAnnotator.js';
 import { AICopilotController, PROVIDER_PRESETS, formatFeedStatusDisplay } from './aiCopilot.js';
 import { getLangPack } from './i18n.js';
 import { escapeHtml } from './sanitize.js';
+import { RealtimeStreamManager, STREAM_CONFIG } from './realtimeStream.js';
 
 class ChartCopilotApp {
   constructor() {
@@ -30,9 +31,12 @@ class ChartCopilotApp {
     this.pollTimer = null;
     this.lastFeedSource = 'live';
     this.lastFeedMeta = null;
+    this.streamState = 'idle';
+    this.lastStreamStatus = null;
 
     this._initElements();
     this._initModules();
+    this._initStreamManager();
     this._applyTheme(this.theme);
     this._applyLanguage(this.uiLang, this.chartLang);
     this._syncEmaPickerUI();
@@ -501,23 +505,89 @@ class ChartCopilotApp {
     this._persistAndApplyEma();
   }
 
-  _updateFeedStatus(source, feedName, meta = this.lastFeedMeta) {
+  _initStreamManager() {
+    this.streamManager = new RealtimeStreamManager({
+      onCandle: (liveCandle) => {
+        this.chart.updateLiveCandle(liveCandle);
+        if (!this.chart.mouse.inside) {
+          const prev = this.chart.candles[this.chart.candles.length - 2] || liveCandle;
+          this._updateOHLCVHud(liveCandle, prev.close);
+        }
+      },
+      onBackfillCandles: (bars) => {
+        this.chart.mergeBackfillCandles(bars);
+        if (!this.chart.mouse.inside && this.chart.candles.length) {
+          const latest = this.chart.candles[this.chart.candles.length - 1];
+          const prev = this.chart.candles[this.chart.candles.length - 2] || latest;
+          this._updateOHLCVHud(latest, prev.close);
+        }
+      },
+      fetchBackfillFn: async ({ symbol, interval, sinceTime }) => {
+        const res = await fetch(
+          `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`
+        );
+        if (!res.ok) return [];
+        const data = await res.json();
+        const all = Array.isArray(data?.candles) ? data.candles : [];
+        return sinceTime ? all.filter((c) => Number(c.time) >= Number(sinceTime)) : all;
+      },
+      onPollTick: async () => {
+        const res = await fetch(
+          `/api/quote?symbol=${encodeURIComponent(this.currentSymbol)}&interval=${encodeURIComponent(this.currentInterval)}`
+        );
+        if (!res.ok) return null;
+        const tick = await res.json();
+        if (tick?.candle) {
+          this.chart.updateLiveCandle(tick.candle);
+          if (!this.chart.mouse.inside) {
+            this._updateOHLCVHud(tick.candle, tick.prevClose);
+          }
+          if (tick.meta && (tick.meta.stale || tick.meta.source === 'simulated' || this.lastFeedMeta?.source !== tick.meta.source)) {
+            this.lastFeedSource = tick.meta.source;
+            this.lastFeedMeta = tick.meta;
+            this.chart.dataMeta = tick.meta;
+            this.copilot.setDataMeta(tick.meta);
+            this._updateFeedStatus(tick.source, tick.feedName, tick.meta);
+          }
+        }
+        return tick;
+      },
+      onStatusChange: (status) => {
+        this.streamState = status.state;
+        this.lastStreamStatus = status;
+        this._updateFeedStatus(this.lastFeedSource, '', this.lastFeedMeta, status);
+      }
+    });
+  }
+
+  _updateFeedStatus(source, feedName, meta = this.lastFeedMeta, streamStatus = this.lastStreamStatus) {
     const disp = formatFeedStatusDisplay(meta, source, feedName);
+    const st = streamStatus?.state || this.streamState || 'idle';
+    const streamSuffix =
+      st === 'reconnecting'
+        ? ` · 重连中${streamStatus?.attempt ? `(${streamStatus.attempt})` : ''}`
+        : st === 'recovered'
+          ? ' · 已恢复'
+          : st === 'paused'
+            ? ' · 已暂停'
+            : '';
 
     if (this.el.liveBadge) {
       this.el.liveBadge.className = disp.badgeClass;
       this.el.liveBadge.dataset.feedStatus = disp.source;
       this.el.liveBadge.dataset.feedStale = String(disp.stale);
+      this.el.liveBadge.dataset.streamState = st;
       this.el.liveBadge.title = disp.tooltip;
     }
     if (this.el.liveBadgeText) {
-      this.el.liveBadgeText.textContent = disp.badgeText;
+      this.el.liveBadgeText.textContent = `${disp.badgeText}${streamSuffix}`;
     }
     if (this.el.hudDataStatusBadge) {
       this.el.hudDataStatusBadge.className = disp.hudClass;
       this.el.hudDataStatusBadge.dataset.feedStatus = disp.source;
       this.el.hudDataStatusBadge.dataset.feedStale = String(disp.stale);
-      this.el.hudDataStatusBadge.textContent = disp.hudText;
+      this.el.hudDataStatusBadge.dataset.streamState = st;
+      this.el.hudDataStatusBadge.textContent = `${disp.hudText}${streamSuffix}`;
       this.el.hudDataStatusBadge.title = disp.tooltip;
     }
     if (this.el.simulatedWatermark) {
@@ -548,14 +618,7 @@ class ChartCopilotApp {
   }
 
   _stopLiveStreams() {
-    if (this.liveWs) {
-      try { this.liveWs.close(); } catch { /* ignore */ }
-      this.liveWs = null;
-    }
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    this.streamManager?.stop();
   }
 
   _startLiveStreams(initialData) {
@@ -563,60 +626,21 @@ class ChartCopilotApp {
       initialData.source === 'live' ||
       (initialData.source === 'cache' && !initialData.meta?.stale);
 
-    if (isRealUpstream && initialData.wsSymbol && initialData.wsInterval) {
-      try {
-        const ws = new WebSocket(
-          `wss://stream.binance.com:9443/ws/${initialData.wsSymbol}@kline_${initialData.wsInterval}`
-        );
-        this.liveWs = ws;
-        ws.onmessage = (evt) => {
-          try {
-            const msg = JSON.parse(evt.data);
-            const k = msg?.k;
-            if (!k) return;
-            const liveCandle = {
-              time: Math.floor(k.t / 1000),
-              open: parseFloat(k.o),
-              high: parseFloat(k.h),
-              low: parseFloat(k.l),
-              close: parseFloat(k.c),
-              volume: parseFloat(k.v)
-            };
-            this.chart.updateLiveCandle(liveCandle);
-            if (!this.chart.mouse.inside) {
-              const prev = this.chart.candles[this.chart.candles.length - 2] || liveCandle;
-              this._updateOHLCVHud(liveCandle, prev.close);
-            }
-          } catch { /* ignore malformed frame */ }
-        };
-        ws.onerror = () => {};
-      } catch { /* fallback to polling */ }
-    }
+    const wsBase = (typeof window !== 'undefined' && window.__WS_BASE_URL) || STREAM_CONFIG.wsBaseUrl;
+    const wsUrl = initialData.wsUrl
+      ? initialData.wsUrl
+      : (isRealUpstream && initialData.wsSymbol && initialData.wsInterval)
+        ? `${wsBase}/${initialData.wsSymbol}@kline_${initialData.wsInterval}`
+        : null;
 
-    const pollMs = isRealUpstream ? 5000 : 2500;
-    this.pollTimer = setInterval(async () => {
-      if (this.liveWs && this.liveWs.readyState === WebSocket.OPEN) return;
-      try {
-        const res = await fetch(
-          `/api/quote?symbol=${encodeURIComponent(this.currentSymbol)}&interval=${encodeURIComponent(this.currentInterval)}`
-        );
-        if (!res.ok) return;
-        const tick = await res.json();
-        if (tick?.candle) {
-          this.chart.updateLiveCandle(tick.candle);
-          if (!this.chart.mouse.inside) {
-            this._updateOHLCVHud(tick.candle, tick.prevClose);
-          }
-          if (tick.meta && (tick.meta.stale || tick.meta.source === 'simulated' || this.lastFeedMeta?.source !== tick.meta.source)) {
-            this.lastFeedSource = tick.meta.source;
-            this.lastFeedMeta = tick.meta;
-            this.chart.dataMeta = tick.meta;
-            this.copilot.setDataMeta(tick.meta);
-            this._updateFeedStatus(tick.source, tick.feedName, tick.meta);
-          }
-        }
-      } catch { /* ignore intermittent poll errors */ }
-    }, pollMs);
+    const latestTime = this.chart.candles.length ? this.chart.candles[this.chart.candles.length - 1].time : 0;
+    this.streamManager?.start({
+      symbol: this.currentSymbol,
+      interval: this.currentInterval,
+      wsUrl,
+      isRealUpstream,
+      lastBarTime: latestTime
+    });
   }
 
   _showAiLayerBar(annotations) {

@@ -26,6 +26,7 @@ import {
   toLwcRealtimeUpdate
 } from './lwcAdapter.js';
 import { AIAnnotationSeriesPrimitive } from './lwcAnnotationPrimitive.js';
+import { mergeCandlesByTimestamp } from './realtimeStream.js';
 
 const THEMES = {
   light: {
@@ -788,6 +789,39 @@ export class ChartEngine {
       if (Number.isFinite(mVal)) try { this.macdLineSeries?.update({ time: latestTime, value: mVal }); } catch { /* ignore */ }
       if (Number.isFinite(sVal)) try { this.macdSignalSeries?.update({ time: latestTime, value: sVal }); } catch { /* ignore */ }
     }
+  }
+
+  mergeBackfillCandles(incomingCandles = []) {
+    if (!Array.isArray(incomingCandles) || !incomingCandles.length) {
+      return { addedCount: 0, updatedCount: 0 };
+    }
+    const prevLastTime = this.candles.length ? this.candles[this.candles.length - 1].time : -Infinity;
+    const tailIncoming = incomingCandles.filter((c) => c && Number(c.time) >= prevLastTime);
+    if (tailIncoming.length === incomingCandles.length && tailIncoming.length <= 2) {
+      for (const bar of tailIncoming) {
+        this.updateLiveCandle(bar);
+      }
+      return { addedCount: tailIncoming.filter((c) => Number(c.time) > prevLastTime).length, updatedCount: tailIncoming.filter((c) => Number(c.time) === prevLastTime).length };
+    }
+
+    const { merged, addedCount, updatedCount } = mergeCandlesByTimestamp(this.candles, incomingCandles);
+    if (!addedCount && !updatedCount) return { addedCount: 0, updatedCount: 0 };
+
+    this.candles = merged;
+    this.timeToIndexMap.clear();
+    for (let i = 0; i < this.candles.length; i++) {
+      this.timeToIndexMap.set(this.candles[i].time, i);
+    }
+    const palette = THEMES[this.theme] || THEMES.light;
+    this.candleSeries?.setData(toLwcCandlestickData(this.candles));
+    this.volumeSeries?.setData(
+      toLwcVolumeData(this.candles, { upColor: palette.volBull, downColor: palette.volBear })
+    );
+    this.indicators = computeAllIndicators(this.candles, this.emaPeriods);
+    this._syncEmaSeries();
+    this._syncBollingerSeries();
+    this._syncMacdPane();
+    return { addedCount, updatedCount };
   }
 
   setAIAnnotations(annotations) {
