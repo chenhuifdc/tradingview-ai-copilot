@@ -682,7 +682,8 @@ test('M2.13 (M2.2 B) Recalibrated scores do not saturate across all 5 NSE fixtur
     { index: 21, time: baseCandles[21].time, price: 970, polarity: 'low' },
     { index: 41, time: baseCandles[41].time, price: 972, polarity: 'low' } // near support (~1.5 ATR away, 2 touches)
   ];
-  const sr = detectSupportResistanceClusters(baseCandles, { swings: controlledSwings, _alreadyNormalized: true });
+  // Disable minScore here solely to inspect raw scores of an intentionally extreme 12-ATR synthetic cluster
+  const sr = detectSupportResistanceClusters(baseCandles, { swings: controlledSwings, minScore: 0, _alreadyNormalized: true });
   const nearSup = sr.supports.find((c) => Math.abs(c.price - 971) < 10);
   const farSup = sr.supports.find((c) => Math.abs(c.price - 761) < 10);
   assert.ok(nearSup && farSup, 'Both near and far controlled supports must be clustered');
@@ -708,7 +709,8 @@ test('M2.14 (M2.2 C) Data-version result cache hits on unchanged data and invali
   assert.deepEqual(getPatternEngineCacheStats(), { hits: 0, misses: 1, size: 1 });
 
   const second = runPatternRuleEngine(relianceCandles, { dataVersion: 'v1' });
-  assert.equal(second, first, 'Cache hit on identical dataset & version must return cached result');
+  assert.deepEqual(second, first, 'Cache hit on identical dataset & version must return deeply equal result');
+  assert.notEqual(second, first, 'Cache hit must return isolated deep clone rather than shared mutable reference');
   assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 1, size: 1 });
 
   // Mutating last bar close invalidates cache automatically even with same dataVersion
@@ -716,17 +718,16 @@ test('M2.14 (M2.2 C) Data-version result cache hits on unchanged data and invali
     idx === relianceCandles.length - 1 ? { ...c, close: Number((c.close + 5).toFixed(2)) } : c
   );
   const third = runPatternRuleEngine(mutated, { dataVersion: 'v1' });
-  assert.notEqual(third, first);
+  assert.notEqual(third.candles[third.candles.length - 1].close, first.candles[first.candles.length - 1].close);
   assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 2, size: 2 });
 
   // Bumping dataVersion invalidates cache
   const fourth = runPatternRuleEngine(relianceCandles, { dataVersion: 'v2' });
-  assert.notEqual(fourth, first);
+  assert.deepEqual(fourth, first);
   assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 3, size: 3 });
 
   // Changing output-affecting options (e.g. maxLevels) invalidates cache
   const fifth = runPatternRuleEngine(relianceCandles, { dataVersion: 'v1', maxLevels: 2 });
-  assert.notEqual(fifth, first);
   assert.ok(fifth.supportResistance.supports.length <= 2);
   assert.deepEqual(getPatternEngineCacheStats(), { hits: 1, misses: 4, size: 4 });
 });
@@ -892,4 +893,135 @@ test('M2.15 (M2.2 C) Real-time tick update path (lwcChartEngine.updateLiveCandle
     globalThis.ResizeObserver = prevRO;
   }
 });
+
+test('M2.16 (M2.3 Item 1) Minimum score thresholds filter weak candidates: flat/structureless market yields 0/sparse outputs and 5 NSE fixtures vary by market structure', async () => {
+  const { runPatternRuleEngine, PATTERN_ENGINE_CONFIG } = await import('../public/js/patternEngine.js');
+
+  // Config must declare explicit minScores for all 5 candidate families
+  assert.ok(PATTERN_ENGINE_CONFIG.minScores, 'PATTERN_ENGINE_CONFIG.minScores must be defined');
+  for (const key of ['supportResistance', 'trendline', 'boxRange', 'divergence', 'pattern']) {
+    assert.ok(
+      typeof PATTERN_ENGINE_CONFIG.minScores[key] === 'number' &&
+        PATTERN_ENGINE_CONFIG.minScores[key] > 0 &&
+        PATTERN_ENGINE_CONFIG.minScores[key] < 1,
+      `minScores.${key} must be a positive threshold in (0, 1)`
+    );
+  }
+
+  // 1) Structureless flat tiny-noise market must yield 0 or near-zero candidates (never padded to max)
+  const flatCandles = Array.from({ length: 120 }, (_, i) => ({
+    time: 1704067200 + i * 86400,
+    open: 1000,
+    high: 1000.4 + (i % 2) * 0.1,
+    low: 999.6 - (i % 2) * 0.1,
+    close: 1000 + ((i % 3) - 1) * 0.1,
+    volume: 100000
+  }));
+  const flatOut = runPatternRuleEngine(flatCandles, { useCache: false });
+  assert.equal(flatOut.supportResistance.supports.length, 0, 'Flat structureless market must yield 0 supports');
+  assert.equal(flatOut.supportResistance.resistances.length, 0, 'Flat structureless market must yield 0 resistances');
+  assert.equal(flatOut.trendlines.length, 0, 'Flat structureless market must yield 0 trendlines');
+  assert.equal(flatOut.boxRanges.length, 0, 'Flat noise market must yield 0 box ranges');
+  assert.equal(flatOut.divergences.length, 0, 'Flat structureless market must yield 0 divergences');
+  assert.equal(flatOut.patterns.length, 0, 'Flat structureless market must yield 0 patterns');
+
+  // 2) Steady monotonic drift without reversals must also yield 0 candidates across all families
+  const driftCandles = Array.from({ length: 120 }, (_, i) => {
+    const base = 1000 + i * 2.5;
+    return {
+      time: 1704067200 + i * 86400,
+      open: base,
+      high: base + 1.5,
+      low: base - 1.5,
+      close: base + 1.2,
+      volume: 100000
+    };
+  });
+  const driftOut = runPatternRuleEngine(driftCandles, { useCache: false });
+  assert.equal(driftOut.supportResistance.supports.length, 0);
+  assert.equal(driftOut.supportResistance.resistances.length, 0);
+  assert.equal(driftOut.trendlines.length, 0);
+  assert.equal(driftOut.boxRanges.length, 0, 'Monotonic drift without consolidation must yield 0 box ranges');
+  assert.equal(driftOut.divergences.length, 0);
+  assert.equal(driftOut.patterns.length, 0);
+
+  // 3) Across all 5 real NSE fixtures: every emitted candidate must meet its minScore, and counts must vary by stock
+  const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
+  const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures;
+  const symbols = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'SUNPHARMA.NS', 'ITC.NS'];
+  const countsByCat = {
+    supports: new Set(),
+    resistances: new Set(),
+    trendlines: new Set(),
+    boxRanges: new Set(),
+    divergences: new Set(),
+    patterns: new Set()
+  };
+
+  for (const sym of symbols) {
+    const out = runPatternRuleEngine(fixtures[sym].candles, { useCache: false });
+    const ms = PATTERN_ENGINE_CONFIG.minScores;
+    for (const c of out.supportResistance.supports) assert.ok(c.score >= ms.supportResistance);
+    for (const c of out.supportResistance.resistances) assert.ok(c.score >= ms.supportResistance);
+    for (const c of out.trendlines) assert.ok(c.score >= ms.trendline);
+    for (const c of out.boxRanges) assert.ok(c.score >= ms.boxRange);
+    for (const c of out.divergences) assert.ok(c.score >= ms.divergence);
+    for (const c of out.patterns) assert.ok(c.score >= ms.pattern);
+
+    countsByCat.supports.add(out.supportResistance.supports.length);
+    countsByCat.resistances.add(out.supportResistance.resistances.length);
+    countsByCat.trendlines.add(out.trendlines.length);
+    countsByCat.boxRanges.add(out.boxRanges.length);
+    countsByCat.divergences.add(out.divergences.length);
+    countsByCat.patterns.add(out.patterns.length);
+  }
+
+  for (const [cat, set] of Object.entries(countsByCat)) {
+    assert.ok(
+      set.size >= 2,
+      `Candidate counts for ${cat} across 5 NSE fixtures must vary by market structure (got identical count set: [${[...set]}])`
+    );
+  }
+});
+
+test('M2.17 (M2.3 Item 2) Data-version cache isolates callers via deep clone so mutating returned result cannot pollute cached entries', async () => {
+  const {
+    runPatternRuleEngine,
+    getPatternEngineCacheStats,
+    clearPatternEngineCache
+  } = await import('../public/js/patternEngine.js');
+  const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
+  const relianceCandles = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures['RELIANCE.NS'].candles;
+
+  clearPatternEngineCache();
+  const first = runPatternRuleEngine(relianceCandles, { dataVersion: 'iso-v1' });
+  const origSupCount = first.supportResistance.supports.length;
+  const origSupScore = first.supportResistance.supports[0].score;
+  const origSupPrice = first.supportResistance.supports[0].price;
+  const origFirstCandleClose = first.candles[0].close;
+
+  // Caller aggressively mutates returned object & nested arrays/objects
+  first.supportResistance.supports[0].score = 0.0001;
+  first.supportResistance.supports[0].price = -9999;
+  first.supportResistance.supports.pop();
+  first.trendlines.length = 0;
+  first.candles[0].close = 123456;
+
+  // Subsequent cache hit must still return pristine unpolluted data
+  const second = runPatternRuleEngine(relianceCandles, { dataVersion: 'iso-v1' });
+  assert.equal(getPatternEngineCacheStats().hits, 1, 'Second call must be a cache hit');
+  assert.notEqual(second, first, 'Cache hit must return an isolated clone rather than exposing internal mutable reference');
+  assert.equal(second.supportResistance.supports.length, origSupCount);
+  assert.equal(second.supportResistance.supports[0].score, origSupScore);
+  assert.equal(second.supportResistance.supports[0].price, origSupPrice);
+  assert.equal(second.candles[0].close, origFirstCandleClose);
+  assert.ok(second.trendlines.length > 0, 'Clearing trendlines on first return must not affect cached trendlines');
+
+  // Mutating the second returned object must also not pollute a third hit
+  second.supportResistance.supports[0].score = 0.1234;
+  const third = runPatternRuleEngine(relianceCandles, { dataVersion: 'iso-v1' });
+  assert.equal(getPatternEngineCacheStats().hits, 2);
+  assert.equal(third.supportResistance.supports[0].score, origSupScore);
+});
+
 

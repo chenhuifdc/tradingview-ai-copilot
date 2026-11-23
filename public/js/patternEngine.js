@@ -40,6 +40,7 @@ export const PATTERN_ENGINE_CONFIG = {
   boxRange: {
     minBars: 10,
     maxBars: 65,
+    minRangePct: 0.015,
     maxRangePct: 0.12,
     touchZonePct: 0.22
   },
@@ -88,6 +89,15 @@ export const PATTERN_ENGINE_CONFIG = {
     pattern: {
       distanceAtrDecay: 6.0
     }
+  },
+  // Minimum score thresholds per candidate family (calibrated on 5 NSE sector daily fixtures).
+  // Candidates below threshold are dropped rather than padded up to maxCandidates.
+  minScores: {
+    supportResistance: 0.55,
+    trendline: 0.54,
+    boxRange: 0.73,
+    divergence: 0.42,
+    pattern: 0.62
   },
   resultCache: {
     maxEntries: 24
@@ -314,7 +324,8 @@ export function detectZigZagSwings(rawCandles, options = {}) {
     }
   }
 
-  return swings;
+  // Require at least one confirmed swing leg (>= 2 alternating extrema); a lone unconfirmed pivot has no structure
+  return swings.length >= 2 ? swings : [];
 }
 
 /**
@@ -419,6 +430,7 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
   const tolerancePct = options.tolerancePct ?? PATTERN_ENGINE_CONFIG.supportResistance.tolerancePct;
   const maxSupports = options.maxLevels ?? PATTERN_ENGINE_CONFIG.maxCandidates.supports;
   const maxResistances = options.maxLevels ?? PATTERN_ENGINE_CONFIG.maxCandidates.resistances;
+  const minScore = options.minScore ?? PATTERN_ENGINE_CONFIG.minScores.supportResistance;
   const tickSize = options.tickSize ?? PATTERN_ENGINE_CONFIG.tickSize.defaultNse;
   const timeZone = options.timeZone || 'Asia/Kolkata';
   const lastIdx = candles.length - 1;
@@ -575,12 +587,12 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
 
   // Supports ranked strictly below/at currentPrice by recalibrated score (ATR distance + touches + confluence + recency)
   const supports = allSorted
-    .filter((c) => c.role === 'support' && c.price <= currentPrice)
+    .filter((c) => c.role === 'support' && c.price <= currentPrice && c.score >= minScore)
     .slice(0, maxSupports);
 
   // Resistances ranked strictly above currentPrice by recalibrated score
   const resistances = allSorted
-    .filter((c) => c.role === 'resistance' && c.price > currentPrice)
+    .filter((c) => c.role === 'resistance' && c.price > currentPrice && c.score >= minScore)
     .slice(0, maxResistances);
 
   return {
@@ -605,6 +617,7 @@ export function detectTrendlines(rawCandles, swingsInput, options = {}) {
   const minBarDistance = options.minBarDistance ?? PATTERN_ENGINE_CONFIG.trendline.minBarDistance;
   const minTouches = options.minTouches ?? PATTERN_ENGINE_CONFIG.trendline.minTouches;
   const maxLines = options.maxLines ?? PATTERN_ENGINE_CONFIG.maxCandidates.trendlines;
+  const minScore = options.minScore ?? PATTERN_ENGINE_CONFIG.minScores.trendline;
   const tickSize = options.tickSize ?? PATTERN_ENGINE_CONFIG.tickSize.defaultNse;
   const touchAtrMult = options.touchAtrMult ?? PATTERN_ENGINE_CONFIG.trendline.touchAtrMult;
   const touchTolerancePct = options.touchTolerancePct ?? PATTERN_ENGINE_CONFIG.trendline.touchTolerancePct;
@@ -617,7 +630,7 @@ export function detectTrendlines(rawCandles, swingsInput, options = {}) {
   const latestAtr = getLatestAtrValue(atrSeries, currentPrice);
   const fallbackAtr = (currentPrice || 100) * 0.015;
   const scCfg = PATTERN_ENGINE_CONFIG.scoring.trendline;
-  const spanScale = Math.max(25, candles.length * 0.28);
+  const spanScale = Math.max(10, candles.length * 0.28);
   const recencyScale = Math.max(20, candles.length * 0.40);
 
   const lows = swings.filter((s) => s.polarity === 'low');
@@ -760,7 +773,9 @@ export function detectTrendlines(rawCandles, swingsInput, options = {}) {
   evaluatePairs(lows, 'support');
   evaluatePairs(highs, 'resistance');
 
-  return sortCandidatesDeterministically(candidates).slice(0, maxLines);
+  return sortCandidatesDeterministically(candidates)
+    .filter((c) => c.score >= minScore)
+    .slice(0, maxLines);
 }
 
 /**
@@ -772,9 +787,11 @@ export function detectBoxRanges(rawCandles, options = {}) {
   const candles = ensureNormalizedCandles(rawCandles, options);
   const minBars = options.minBars ?? PATTERN_ENGINE_CONFIG.boxRange.minBars;
   const maxBars = options.maxBars ?? PATTERN_ENGINE_CONFIG.boxRange.maxBars;
+  const minRangePct = options.minRangePct ?? PATTERN_ENGINE_CONFIG.boxRange.minRangePct;
   const maxRangePct = options.maxRangePct ?? PATTERN_ENGINE_CONFIG.boxRange.maxRangePct;
   const tickSize = options.tickSize ?? PATTERN_ENGINE_CONFIG.tickSize.defaultNse;
   const maxBoxes = options.maxBoxes ?? PATTERN_ENGINE_CONFIG.maxCandidates.boxRanges;
+  const minScore = options.minScore ?? PATTERN_ENGINE_CONFIG.minScores.boxRange;
 
   const n = candles.length;
   if (n < minBars) return [];
@@ -816,7 +833,7 @@ export function detectBoxRanges(rawCandles, options = {}) {
       const mid = (upper + lower) * 0.5;
       const heightPct = (upper - lower) / Math.max(1e-9, mid);
 
-      if (heightPct <= 0 || heightPct > maxRangePct) continue;
+      if (heightPct < minRangePct || heightPct > maxRangePct) continue;
 
       const touchBand = (upper - lower) * PATTERN_ENGINE_CONFIG.boxRange.touchZonePct;
       const upperThresh = upper - touchBand;
@@ -826,16 +843,20 @@ export function detectBoxRanges(rawCandles, options = {}) {
 
       let upperTouches = 0;
       let lowerTouches = 0;
+      let firstUpperTouchIndex = -1;
+      let firstLowerTouchIndex = -1;
       let upperTouchIndex = start;
       let lowerTouchIndex = start;
       let outsideCloses = 0;
 
       for (let idx = start; idx <= end; idx++) {
         if (highsArr[idx] >= upperThresh) {
+          if (firstUpperTouchIndex === -1) firstUpperTouchIndex = idx;
           upperTouches++;
           upperTouchIndex = idx;
         }
         if (lowsArr[idx] <= lowerThresh) {
+          if (firstLowerTouchIndex === -1) firstLowerTouchIndex = idx;
           lowerTouches++;
           lowerTouchIndex = idx;
         }
@@ -846,7 +867,13 @@ export function detectBoxRanges(rawCandles, options = {}) {
         }
       }
 
-      if (upperTouches >= 2 && lowerTouches >= 2 && outsideCloses <= maxOutside) {
+      const hasHorizontalOscillation =
+        firstUpperTouchIndex !== -1 &&
+        firstLowerTouchIndex !== -1 &&
+        firstUpperTouchIndex < lowerTouchIndex &&
+        firstLowerTouchIndex < upperTouchIndex;
+
+      if (upperTouches >= 2 && lowerTouches >= 2 && outsideCloses <= maxOutside && hasHorizontalOscillation) {
         const roundedUpper = roundToTick(upper, tickSize);
         const roundedLower = roundToTick(lower, tickSize);
         const startAnchor = {
@@ -912,8 +939,8 @@ export function detectBoxRanges(rawCandles, options = {}) {
     }
   }
 
-  // Deduplicate overlapping boxes keeping highest score
-  const sorted = sortCandidatesDeterministically(boxes);
+  // Filter below-threshold boxes before deduplicating overlapping ranges
+  const sorted = sortCandidatesDeterministically(boxes).filter((b) => b.score >= minScore);
   const selected = [];
   for (const box of sorted) {
     const overlaps = selected.some(
@@ -943,6 +970,7 @@ export function detectMacdDivergences(rawCandles, swingsInput, options = {}) {
   const maxBarDistance = options.maxBarDistance ?? PATTERN_ENGINE_CONFIG.divergence.maxBarDistance;
   const tickSize = options.tickSize ?? PATTERN_ENGINE_CONFIG.tickSize.defaultNse;
   const maxDivergences = options.maxDivergences ?? PATTERN_ENGINE_CONFIG.maxCandidates.divergences;
+  const minScore = options.minScore ?? PATTERN_ENGINE_CONFIG.minScores.divergence;
 
   const lastIdx = candles.length - 1;
   const recencyScale = Math.max(20, candles.length * 0.35);
@@ -1082,7 +1110,9 @@ export function detectMacdDivergences(rawCandles, swingsInput, options = {}) {
     }
   }
 
-  return sortCandidatesDeterministically(divergences).slice(0, maxDivergences);
+  return sortCandidatesDeterministically(divergences)
+    .filter((c) => c.score >= minScore)
+    .slice(0, maxDivergences);
 }
 
 /**
@@ -1101,6 +1131,7 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
   const tolerancePct = options.tolerancePct ?? 0.022;
   const tickSize = options.tickSize ?? PATTERN_ENGINE_CONFIG.tickSize.defaultNse;
   const maxPatterns = options.maxPatterns ?? PATTERN_ENGINE_CONFIG.maxCandidates.patterns;
+  const minScore = options.minScore ?? PATTERN_ENGINE_CONFIG.minScores.pattern;
   const lastIdx = candles.length - 1;
   const currentPrice = candles[lastIdx].close;
   const latestAtr = getLatestAtrValue(atrSeries, currentPrice);
@@ -1352,7 +1383,9 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
     }
   }
 
-  return sortCandidatesDeterministically(patterns).slice(0, maxPatterns);
+  return sortCandidatesDeterministically(patterns)
+    .filter((c) => c.score >= minScore)
+    .slice(0, maxPatterns);
 }
 
 // ============================================================================
@@ -1360,6 +1393,13 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
 // ============================================================================
 const engineResultCache = new Map();
 const engineCacheStats = { hits: 0, misses: 0 };
+
+function cloneEngineResult(val) {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(val);
+  }
+  return JSON.parse(JSON.stringify(val));
+}
 
 export function computeCandlesVersionKey(candles, options = {}) {
   if (!Array.isArray(candles) || candles.length === 0) return 'empty';
@@ -1410,7 +1450,8 @@ export function clearPatternEngineCache() {
 /**
  * Master entry point: Run the entire deterministic pattern rule engine on daily candles.
  * Supports deterministic data-version result caching (`useCache: true` by default; pass
- * `{ useCache: false }` for raw compute benchmarks).
+ * `{ useCache: false }` for raw compute benchmarks). Cached entries are isolated via deep clone
+ * so caller mutations can never pollute cached results.
  */
 export function runPatternRuleEngine(rawCandles, options = {}) {
   const useCache = options.useCache !== false;
@@ -1422,7 +1463,7 @@ export function runPatternRuleEngine(rawCandles, options = {}) {
     engineResultCache.delete(cacheKey);
     engineResultCache.set(cacheKey, cached);
     engineCacheStats.hits += 1;
-    return cached;
+    return cloneEngineResult(cached);
   }
 
   const candles = ensureNormalizedCandles(rawCandles, options);
@@ -1435,7 +1476,7 @@ export function runPatternRuleEngine(rawCandles, options = {}) {
       boxRanges: [],
       divergences: [],
       patterns: [],
-      config: PATTERN_ENGINE_CONFIG
+      config: cloneEngineResult(PATTERN_ENGINE_CONFIG)
     };
   }
 
@@ -1467,6 +1508,7 @@ export function runPatternRuleEngine(rawCandles, options = {}) {
       if (oldestKey !== undefined) engineResultCache.delete(oldestKey);
     }
     engineResultCache.set(cacheKey, result);
+    return cloneEngineResult(result);
   }
 
   return result;
