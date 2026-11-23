@@ -2228,3 +2228,15 @@ button, input, textarea {
   .symbol-subname { display: none; }
   .copilot-pane { width: 320px; }
 }
+
+.corner-disclaimer {
+  position: fixed;
+  left: 12px;
+  bottom: 6px;
+  z-index: 40;
+  font-size: 11px;
+  line-height: 1.3;
+  color: rgba(120, 123, 134, 0.85);
+  pointer-events: none;
+  user-select: none;
+}

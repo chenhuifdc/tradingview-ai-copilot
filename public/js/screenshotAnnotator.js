@@ -1,13 +1,82 @@
 /**
- * AI Chart Screenshot Annotator & Full-Screen Screenshot Studio.
- * Takes a captured K-line chart snapshot + AI annotations and renders a crisp,
- * publication-grade annotated PNG image (with header banner, legend footer,
- * non-overlapping labels, and optional user markup in Studio mode).
+ * AI Chart Screenshot Annotator & Offscreen 1600x900 @ 2x DPR Exporter.
+ * Takes a captured LWC v5.2.1 chart snapshot (with native Series Primitive annotations)
+ * and renders a crisp, light-theme 1600x900 (3200x1800 physical px @ 2x DPR) PNG
+ * with header bar (stock & exchange, interval, IST data time, price basis) and legend footer.
  */
 
-import { drawAnnotationsLayer } from './chartEngine.js';
+import { detectRupeeGlyphSupport } from './lwcAnnotationPrimitive.js';
 import { formatPrice, formatVolume, formatTimeLabel } from './indicators.js';
 import { getLangPack } from './i18n.js';
+
+export const EXPORT_CONFIG = {
+  width: 1600,
+  height: 900,
+  headerHeight: 44,
+  footerHeight: 32,
+  chartHeight: 824, // 900 - 44 - 32
+  dpr: 2,
+  theme: 'light',
+  language: 'en'
+};
+
+let _cachedCjkSupport = null;
+
+export function detectCjkGlyphSupport() {
+  if (_cachedCjkSupport !== null) return _cachedCjkSupport;
+  try {
+    if (typeof document === 'undefined') {
+      _cachedCjkSupport = false;
+      return false;
+    }
+    const c = document.createElement('canvas');
+    c.width = 48;
+    c.height = 48;
+    const ctx = c.getContext('2d');
+    if (!ctx) {
+      _cachedCjkSupport = false;
+      return false;
+    }
+    const renderSample = (ch) => {
+      ctx.clearRect(0, 0, 48, 48);
+      ctx.fillStyle = '#000000';
+      ctx.font = '24px "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(ch, 4, 4);
+      const data = ctx.getImageData(0, 0, 48, 48).data;
+      let nonZero = 0;
+      const hash = [];
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 20) nonZero++;
+        hash.push(data[i] > 20 ? 1 : 0);
+      }
+      return { nonZero, sig: hash.join('') };
+    };
+    const cjk = renderSample('支');
+    const cjk2 = renderSample('撑');
+    const missing = renderSample('\uFFFF');
+    _cachedCjkSupport = cjk.nonZero > 12 && cjk2.nonZero > 12 && cjk.sig !== missing.sig && cjk.sig !== cjk2.sig;
+    return _cachedCjkSupport;
+  } catch {
+    _cachedCjkSupport = false;
+    return false;
+  }
+}
+
+export function detectChartFontSupport(requestedLang = EXPORT_CONFIG.language) {
+  const rupee = detectRupeeGlyphSupport();
+  const cjkSupported = detectCjkGlyphSupport();
+  const useLang = requestedLang === 'zh-CN' && !cjkSupported ? 'en' : (requestedLang || EXPORT_CONFIG.language);
+  const fontFallbackReason =
+    requestedLang === 'zh-CN' && !cjkSupported ? 'CJK font unavailable on host; downgraded to English ASCII' : null;
+  return {
+    rupeeSupported: rupee.supported,
+    currencyPrefix: rupee.prefix,
+    cjkSupported,
+    effectiveLang: useLang,
+    fontFallbackReason
+  };
+}
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
@@ -62,31 +131,30 @@ function drawUserMarkups(ctx, markups) {
 }
 
 /**
- * Render an executive-grade Annotated Chart Screenshot PNG in any supported chart language.
+ * Render an executive-grade Annotated Chart Screenshot PNG (default 1600x900 @ 2x DPR, light theme).
+ * Chart annotations are natively rendered inside snapshot.cleanDataUrl via LWC Series Primitive.
  */
 export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}, options = {}) {
   const {
-    showAnnotations = true,
-    lang = snapshot.geometry?.lang || 'zh-CN',
-    layers = {
-      horizontalLevels: true,
-      trendlines: true,
-      patterns: true,
-      signals: true,
-      tradePlan: true
-    },
+    lang = EXPORT_CONFIG.language,
+    theme = EXPORT_CONFIG.theme,
+    width = EXPORT_CONFIG.width,
+    height = EXPORT_CONFIG.height,
+    dpr = EXPORT_CONFIG.dpr,
     userMarkups = []
   } = options;
 
-  const pack = getLangPack(lang);
+  const fontInfo = detectChartFontSupport(lang);
+  const effectiveLang = fontInfo.effectiveLang;
+  const pack = getLangPack(effectiveLang);
   const C = pack.chart;
   const H = pack.hud;
 
-  const headerH = 38;
-  const footerH = 28;
-  const dpr = 2;
-  const totalW = snapshot.width;
-  const totalH = snapshot.height + headerH + footerH;
+  const headerH = EXPORT_CONFIG.headerHeight;
+  const footerH = EXPORT_CONFIG.footerHeight;
+  const totalW = width;
+  const totalH = height;
+  const chartAreaH = Math.max(120, totalH - headerH - footerH);
 
   const canvas = document.createElement('canvas');
   canvas.width = Math.floor(totalW * dpr);
@@ -94,17 +162,17 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 
-  const isDark = snapshot.geometry.theme === 'dark';
+  const isDark = theme === 'dark';
   const bg = isDark ? '#131722' : '#ffffff';
   const barBg = isDark ? '#1e222d' : '#f8f9fd';
   const border = isDark ? '#2a2e39' : '#e0e3eb';
   const fg = isDark ? '#d1d4dc' : '#131722';
-  const muted = '#787b86';
+  const muted = '#5d606b';
 
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, totalW, totalH);
 
-  // 1. Header Stamp Bar
+  // 1. Header Stamp Bar (Stock & Exchange, Interval, Data Time IST, Price Basis, Bias Pill)
   ctx.fillStyle = barBg;
   ctx.fillRect(0, 0, totalW, headerH);
   ctx.strokeStyle = border;
@@ -115,28 +183,38 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
   ctx.stroke();
 
   const inst = snapshot.instrument || {};
-  const displayTitle = lang === 'en' ? (inst.enName || inst.displaySymbol || 'Chart') : (inst.name || inst.displaySymbol || 'Chart');
-  const title = `${displayTitle} (${inst.displaySymbol || ''}) · ${snapshot.interval?.toUpperCase() || '1D'}`;
+  const dataMeta = snapshot.dataMeta || meta.dataMeta || null;
+  const symCode = dataMeta?.resolvedSymbol || inst.symbol || inst.displaySymbol || 'CHART';
+  const exchange = dataMeta?.exchange || inst.exchange || (inst.market === 'in' ? 'NSE' : '');
+  const intervalStr = String(snapshot.interval || '1d').toUpperCase();
+  const displayName =
+    effectiveLang === 'en'
+      ? (inst.enName || inst.displaySymbol || symCode)
+      : (inst.name || inst.enName || inst.displaySymbol || symCode);
+
+  const priceBasis = inst.market === 'in' ? `Price: INR (${fontInfo.currencyPrefix})` : 'Price: USD';
+  const headerTitle = `${displayName} (${symCode}${exchange ? ` · ${exchange}` : ''})  |  ${intervalStr}  |  ${priceBasis}`;
+
   ctx.fillStyle = fg;
-  ctx.font = '700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.font = '700 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
   ctx.textBaseline = 'middle';
-  ctx.fillText(title, 14, headerH / 2);
+  ctx.fillText(headerTitle, 18, headerH / 2);
 
   // Bias Verdict Pill
   const bias = meta.bias || 'neutral';
   const biasWord = bias === 'bullish' ? C.biasBull : bias === 'bearish' ? C.biasBear : C.biasNeu;
   const biasLabel = `${C.verdictPrefix}: ${biasWord}`;
   const biasColor = bias === 'bullish' ? '#089981' : bias === 'bearish' ? '#f23645' : '#2962ff';
-  const titleW = ctx.measureText(title).width;
-  const pillX = Math.min(totalW - 230, 26 + titleW);
+  const titleW = ctx.measureText(headerTitle).width;
+  const pillX = Math.min(totalW - 380, 32 + titleW);
 
-  ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif';
   const pillText = meta.confidence ? `${biasLabel} (${meta.confidence}%)` : biasLabel;
-  const pillW = ctx.measureText(pillText).width + 16;
+  const pillW = ctx.measureText(pillText).width + 18;
   ctx.fillStyle = biasColor;
   const rx = pillX;
-  const ry = headerH / 2 - 10;
-  const rh = 20;
+  const ry = headerH / 2 - 11;
+  const rh = 22;
   const rr = 4;
   ctx.beginPath();
   ctx.moveTo(rx + rr, ry);
@@ -147,22 +225,34 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
   ctx.closePath();
   ctx.fill();
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(pillText, pillX + 8, headerH / 2 + 0.5);
+  ctx.fillText(pillText, pillX + 9, headerH / 2 + 0.5);
 
-  const stamp = `${meta.modelLabel || 'ChartCopilot AI'} · ${formatTimeLabel(Math.floor(snapshot.capturedAt / 1000), '15m', true)}`;
+  // IST Data Time Stamp (right side of header)
+  const latestSec = dataMeta?.latestBarTime || snapshot.latestCandle?.time || Math.floor((snapshot.capturedAt || Date.now()) / 1000);
+  const istTimeStr = formatTimeLabel(latestSec, '15m', true);
+  const statusTag =
+    dataMeta?.source === 'simulated'
+      ? 'SIMULATED'
+      : dataMeta?.source === 'cache' || dataMeta?.stale
+        ? (dataMeta?.stale ? 'CACHE (STALE)' : 'CACHE')
+        : 'LIVE';
+  const stamp = `Data: ${istTimeStr}  |  ${statusTag}`;
   ctx.fillStyle = muted;
-  ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'right';
-  ctx.fillText(stamp, totalW - 14, headerH / 2);
+  ctx.fillText(stamp, totalW - 18, headerH / 2);
   ctx.textAlign = 'left';
 
-  // 2. Base Clean Chart Screenshot + Localized OHLCV Stamp
-  const baseImg = await loadImage(snapshot.cleanDataUrl);
-  ctx.drawImage(baseImg, 0, headerH, snapshot.width, snapshot.height);
+  // 2. Base LWC Chart Image (already includes native Series Primitive annotations)
+  if (snapshot.cleanDataUrl) {
+    const baseImg = await loadImage(snapshot.cleanDataUrl);
+    ctx.drawImage(baseImg, 0, headerH, totalW, chartAreaH);
+  }
 
+  // OHLCV Stamp inside chart top-left
   if (snapshot.latestCandle) {
     const c = snapshot.latestCandle;
-    const prec = snapshot.geometry.precision;
+    const prec = snapshot.geometry?.precision ?? 2;
     const pc = snapshot.prevClose ?? c.open;
     const diff = c.close - pc;
     const pct = pc ? (diff / pc) * 100 : 0;
@@ -172,22 +262,27 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
     ctx.font = '600 11px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textBaseline = 'top';
     const tw = ctx.measureText(txt).width;
-    ctx.fillStyle = isDark ? 'rgba(19,23,34,0.82)' : 'rgba(255,255,255,0.88)';
-    ctx.fillRect(8, headerH + 6, tw + 12, 18);
+    ctx.fillStyle = isDark ? 'rgba(19,23,34,0.82)' : 'rgba(255,255,255,0.9)';
+    ctx.fillRect(10, headerH + 6, tw + 12, 18);
     ctx.fillStyle = col;
-    ctx.fillText(txt, 14, headerH + 9);
+    ctx.fillText(txt, 16, headerH + 9);
     ctx.restore();
   }
 
-  // 3. Draw Crisp Vector AI Annotations directly onto the screenshot image in the active language!
-  if (showAnnotations && annotations) {
+  // Simulated watermark ONLY when source === 'simulated'
+  if (dataMeta?.source === 'simulated') {
     ctx.save();
-    ctx.translate(0, headerH);
-    drawAnnotationsLayer(ctx, { ...snapshot.geometry, lang }, annotations, { layers, lang });
+    ctx.translate(totalW / 2, headerH + chartAreaH / 2);
+    ctx.rotate(-0.24);
+    ctx.font = '800 44px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = 'rgba(242, 54, 69, 0.14)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SIMULATED DATA - DEMO ONLY', 0, 0);
     ctx.restore();
   }
 
-  // 4. Draw any user manual markups from Screenshot Studio
+  // 3. Draw any user manual markups from Screenshot Studio
   if (userMarkups.length) {
     ctx.save();
     ctx.translate(0, headerH);
@@ -195,8 +290,8 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
     ctx.restore();
   }
 
-  // 5. Legend Footer Bar
-  const footY = headerH + snapshot.height;
+  // 4. Legend Footer Bar
+  const footY = headerH + chartAreaH;
   ctx.fillStyle = barBg;
   ctx.fillRect(0, footY, totalW, footerH);
   ctx.strokeStyle = border;
@@ -212,20 +307,20 @@ export async function renderAnnotatedScreenshot(snapshot, annotations, meta = {}
     { color: '#f23645', label: C.legendDownSl },
     { color: '#2962ff', label: C.legendPat }
   ];
-  let lx = 14;
-  ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+  let lx = 18;
+  ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textBaseline = 'middle';
   for (const item of legendItems) {
     ctx.fillStyle = item.color;
     ctx.fillRect(lx, footY + footerH / 2 - 4, 10, 8);
     ctx.fillStyle = muted;
-    ctx.fillText(item.label, lx + 14, footY + footerH / 2 + 0.5);
-    lx += ctx.measureText(item.label).width + 28;
+    ctx.fillText(item.label, lx + 15, footY + footerH / 2 + 0.5);
+    lx += ctx.measureText(item.label).width + 32;
   }
 
   ctx.fillStyle = muted;
   ctx.textAlign = 'right';
-  ctx.fillText(C.shotFooter, totalW - 14, footY + footerH / 2 + 0.5);
+  ctx.fillText(C.shotFooter, totalW - 18, footY + footerH / 2 + 0.5);
   ctx.textAlign = 'left';
 
   return canvas.toDataURL('image/png');
@@ -334,11 +429,11 @@ export class ScreenshotStudio {
 
   _getCanvasChartCoords(e) {
     const rect = this.canvas.getBoundingClientRect();
-    const scaleX = (this.snapshot.width) / rect.width;
-    const scaleY = (this.snapshot.height + 38 + 28) / rect.height;
+    const scaleX = EXPORT_CONFIG.width / rect.width;
+    const scaleY = EXPORT_CONFIG.height / rect.height;
     return {
       x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY - 38
+      y: (e.clientY - rect.top) * scaleY - EXPORT_CONFIG.headerHeight
     };
   }
 

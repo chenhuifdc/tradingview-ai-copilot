@@ -13,7 +13,7 @@ import {
   runLocalQuantitativeAnalysis
 } from './localAnalyzer.js';
 import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
-import { renderAnnotatedScreenshot, downloadDataUrl } from './screenshotAnnotator.js';
+import { renderAnnotatedScreenshot, downloadDataUrl, EXPORT_CONFIG } from './screenshotAnnotator.js';
 import { getLangPack, getLangMeta } from './i18n.js';
 import { escapeHtml, sanitizeImageDataUrl, renderSafeMarkdown } from './sanitize.js';
 import { runM4Pipeline } from './m4Pipeline.js';
@@ -1084,29 +1084,44 @@ export class AICopilotController {
           }))
         : null;
 
-      let annotatedImageUrl = null;
-      if (captureScreenshot) {
-        annotatedImageUrl = await renderAnnotatedScreenshot(
-          snapshot,
-          globalAnnotations,
-          {
-            bias: analysisResult.bias,
-            confidence: analysisResult.confidence,
-            modelLabel
-          },
-          { showAnnotations: Boolean(globalAnnotations), lang: this.chartLang }
-        );
-      }
-
       if (autoDraw && globalAnnotations) {
         this.chart.setAIAnnotations(globalAnnotations);
         this.onAnnotationsApplied(globalAnnotations, ctx);
       }
 
+      let exportSnapshot = snapshot;
+      let annotatedImageUrl = null;
+      if (captureScreenshot) {
+        if (typeof this.chart.captureExportSnapshot === 'function') {
+          exportSnapshot = this.chart.captureExportSnapshot({
+            width: EXPORT_CONFIG.width,
+            height: EXPORT_CONFIG.chartHeight,
+            theme: EXPORT_CONFIG.theme,
+            includeAnnotations: Boolean(globalAnnotations),
+            annotations: globalAnnotations,
+            lang: EXPORT_CONFIG.language
+          });
+        }
+        annotatedImageUrl = await renderAnnotatedScreenshot(
+          exportSnapshot,
+          globalAnnotations,
+          {
+            bias: analysisResult.bias,
+            confidence: analysisResult.confidence,
+            modelLabel,
+            dataMeta: effectiveMeta
+          },
+          {
+            lang: EXPORT_CONFIG.language,
+            theme: EXPORT_CONFIG.theme
+          }
+        );
+      }
+
       this.lastResult = {
-        snapshot,
+        snapshot: exportSnapshot,
         annotations: globalAnnotations,
-        meta: { bias: analysisResult.bias, confidence: analysisResult.confidence, modelLabel },
+        meta: { bias: analysisResult.bias, confidence: analysisResult.confidence, modelLabel, dataMeta: effectiveMeta },
         annotatedImageUrl,
         analysisResult
       };
@@ -1115,7 +1130,7 @@ export class AICopilotController {
       const cardEl = this._appendAssistantMessage({
         analysisResult,
         annotations: globalAnnotations,
-        snapshot,
+        snapshot: exportSnapshot,
         annotatedImageUrl,
         modelLabel,
         fallbackNotice,

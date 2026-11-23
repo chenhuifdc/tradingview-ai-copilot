@@ -1019,6 +1019,135 @@ export class ChartEngine {
       interval: this.interval,
       latestCandle: lastCandle,
       prevClose: prevCandle?.close ?? null,
+      dataMeta: this.dataMeta ? { ...this.dataMeta } : null,
+      capturedAt: Date.now()
+    };
+  }
+
+  captureExportSnapshot({
+    width = 1600,
+    height = 824,
+    theme = 'light',
+    includeAnnotations = true,
+    annotations = null,
+    lang = 'en',
+    currencyPrefix = null
+  } = {}) {
+    const prevWidth = this.width;
+    const prevHeight = this.height;
+    const prevTheme = this.theme;
+    const prevVis = this._showAIAnnotations;
+    const prevAnn = this.aiAnnotations;
+    const prevLogicalRange = this.lwcChart?.timeScale()?.getVisibleLogicalRange?.() || null;
+    const resolvedPrefix = currencyPrefix !== null ? currencyPrefix : (this.instrument?.market === 'in' ? '₹' : '');
+
+    let cleanDataUrl = '';
+    let shotWidth = width;
+    let shotHeight = height;
+    let dprUsed = this.dpr;
+    let exportGeo = null;
+
+    try {
+      if (this.lwcChart) {
+        if (theme && theme !== prevTheme) {
+          this.setTheme(theme);
+        }
+        this.width = width;
+        this.height = height;
+        this.lwcChart.resize(width, height, true);
+
+        if (prevLogicalRange) {
+          this.lwcChart.timeScale().setVisibleLogicalRange(prevLogicalRange);
+        }
+
+        const targetAnn = annotations !== null ? annotations : prevAnn;
+        if (targetAnn) {
+          this.setAIAnnotations(targetAnn);
+        }
+        if (this.annotationPrimitive) {
+          this.annotationPrimitive.setAnnotations(targetAnn, {
+            lang,
+            currencyPrefix: resolvedPrefix
+          });
+          this.annotationPrimitive.setVisible(Boolean(includeAnnotations && targetAnn));
+        }
+
+        const shotCanvas = this.lwcChart.takeScreenshot(true, false);
+        shotWidth = shotCanvas.width;
+        shotHeight = shotCanvas.height;
+        dprUsed = width > 0 ? shotCanvas.width / width : this.dpr;
+        cleanDataUrl = shotCanvas.toDataURL('image/png');
+        exportGeo = this.getGeometry();
+
+        const ts = this.lwcChart.timeScale();
+        const cs = this.candleSeries;
+        const hLines = (targetAnn?.horizontalLevels || []).map((lvl) => ({
+          type: lvl.type,
+          price: lvl.price,
+          y: cs ? cs.priceToCoordinate(lvl.price) : null
+        })).filter((x) => Number.isFinite(x.y));
+        const anchors = [];
+        for (const t of (targetAnn?.trendlines || [])) {
+          const x1 = ts && this.candles[t.startIndex] ? ts.timeToCoordinate(this.candles[t.startIndex].time) : null;
+          const y1 = cs ? cs.priceToCoordinate(t.startPrice) : null;
+          const x2 = ts && this.candles[t.endIndex] ? ts.timeToCoordinate(this.candles[t.endIndex].time) : null;
+          const y2 = cs ? cs.priceToCoordinate(t.endPrice) : null;
+          if (Number.isFinite(x1) && Number.isFinite(y1)) anchors.push({ kind: 'trendline', x: x1, y: y1 });
+          if (Number.isFinite(x2) && Number.isFinite(y2)) anchors.push({ kind: 'trendline', x: x2, y: y2 });
+        }
+        for (const p of (targetAnn?.patterns || [])) {
+          for (const pt of (p.points || [])) {
+            const x = ts && this.candles[pt.index] ? ts.timeToCoordinate(this.candles[pt.index].time) : null;
+            const y = cs ? cs.priceToCoordinate(pt.price) : null;
+            if (Number.isFinite(x) && Number.isFinite(y)) anchors.push({ kind: 'pattern', x, y });
+          }
+        }
+        exportGeo.exportCoords = { hLines, anchors };
+      }
+    } finally {
+      if (this.lwcChart) {
+        if (prevTheme !== this.theme) {
+          this.setTheme(prevTheme);
+        }
+        this.width = prevWidth;
+        this.height = prevHeight;
+        this.lwcChart.resize(prevWidth, prevHeight, true);
+        if (prevLogicalRange) {
+          this.lwcChart.timeScale().setVisibleLogicalRange(prevLogicalRange);
+        }
+      }
+      if (prevAnn) {
+        this.setAIAnnotations(prevAnn);
+      }
+      if (this.annotationPrimitive) {
+        this.annotationPrimitive.setAnnotations(prevAnn, {
+          lang: this.lang,
+          currencyPrefix: this.instrument?.market === 'in' ? '₹' : ''
+        });
+        this.annotationPrimitive.setVisible(prevVis);
+      }
+    }
+
+    const lastCandle = this.candles.length ? { ...this.candles[this.candles.length - 1] } : null;
+    const prevCandle = this.candles.length > 1 ? { ...this.candles[this.candles.length - 2] } : lastCandle;
+    const finalGeo = exportGeo || this.getGeometry();
+
+    return {
+      cleanDataUrl,
+      width,
+      height,
+      bitmapWidth: shotWidth,
+      bitmapHeight: shotHeight,
+      dpr: dprUsed,
+      theme,
+      geometry: finalGeo,
+      visibleStart: finalGeo.visibleStart,
+      visibleEnd: finalGeo.visibleEnd,
+      instrument: { ...this.instrument },
+      interval: this.interval,
+      latestCandle: lastCandle,
+      prevClose: prevCandle?.close ?? null,
+      dataMeta: this.dataMeta ? { ...this.dataMeta } : null,
       capturedAt: Date.now()
     };
   }
