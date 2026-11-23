@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
+const { createAppServer } = require('../../server');
 
 /**
  * Locate an installed Chromium / Chrome binary across common paths or env override.
@@ -47,40 +48,46 @@ function getFreePort() {
   });
 }
 
-async function startAppServer(envOverrides = {}) {
-  const port = await getFreePort();
-  const serverPath = path.join(__dirname, '..', '..', 'server.js');
-  const child = spawn(process.execPath, [serverPath], {
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), ...envOverrides },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-
+/**
+ * Start an in-process ChartCopilot HTTP server with injectable mock marketService / aiProxy
+ * so all browser E2E tests are 100% deterministic and offline-reproducible.
+ */
+async function startMockAppServer(serverOptions = {}) {
+  const srv = createAppServer(serverOptions);
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('App server start timeout')), 5000);
-    child.stdout.on('data', (d) => {
-      if (d.toString().includes(String(port))) {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`Server exited with code ${code}`));
-    });
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', resolve);
   });
-
+  const { port } = srv.address();
   return {
     port,
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () => {
-      try {
-        child.kill('SIGTERM');
-      } catch {}
+    close: async () => {
+      if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections();
+      await new Promise((resolve) => srv.close(resolve));
     }
   };
 }
 
-async function withCdpPage(chromeBin, targetUrl, fn) {
+function makeMockCandles({ count = 120, endSec = Math.floor(Date.parse('2026-03-20T10:00:00Z') / 1000), stepSec = 86400, basePrice = 1360 } = {}) {
+  return Array.from({ length: count }, (_, i) => {
+    const wave = Math.sin(i / 6) * 28 + Math.cos(i / 13) * 14;
+    const open = Number((basePrice + wave).toFixed(2));
+    const close = Number((open + Math.sin(i / 3) * 11).toFixed(2));
+    const high = Number((Math.max(open, close) + 8 + (i % 5)).toFixed(2));
+    const low = Number((Math.min(open, close) - 8 - (i % 4)).toFixed(2));
+    return {
+      time: endSec - (count - 1 - i) * stepSec,
+      open,
+      high,
+      low,
+      close,
+      volume: 150000 + i * 1200
+    };
+  });
+}
+
+async function withCdpPage(chromeBin, targetUrl, fn, { width = 1440, height = 900, deviceScaleFactor = 1 } = {}) {
   const debugPort = await getFreePort();
   const chrome = spawn(
     chromeBin,
@@ -89,16 +96,16 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
       '--no-sandbox',
       '--disable-gpu',
       '--disable-dev-shm-usage',
-      '--window-size=1440,900',
+      `--window-size=${width},${height}`,
       `--remote-debugging-port=${debugPort}`,
-      targetUrl
+      'about:blank'
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
 
   try {
     let wsUrl = null;
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 50; i++) {
       await new Promise((r) => setTimeout(r, 150));
       try {
         const res = await fetch(`http://127.0.0.1:${debugPort}/json/list`);
@@ -120,6 +127,9 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
 
     let msgId = 1;
     const pending = new Map();
+    const consoleErrors = [];
+    const pageExceptions = [];
+
     ws.addEventListener('message', (ev) => {
       const data = JSON.parse(ev.data);
       if (data.id && pending.has(data.id)) {
@@ -127,6 +137,17 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
         pending.delete(data.id);
         if (data.error) reject(new Error(data.error.message));
         else resolve(data.result);
+      } else if (data.method === 'Runtime.consoleAPICalled') {
+        if (data.params?.type === 'error') {
+          const text = (data.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ');
+          consoleErrors.push(text);
+        }
+      } else if (data.method === 'Runtime.exceptionThrown') {
+        const desc =
+          data.params?.exceptionDetails?.exception?.description ||
+          data.params?.exceptionDetails?.text ||
+          'Unknown page exception';
+        pageExceptions.push(desc);
       }
     });
 
@@ -139,6 +160,15 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
 
     await sendCdp('Runtime.enable');
     await sendCdp('Page.enable');
+    if (deviceScaleFactor !== 1) {
+      await sendCdp('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor,
+        mobile: false
+      });
+    }
+    await sendCdp('Page.navigate', { url: targetUrl });
 
     const evaluate = async (expression) => {
       const res = await sendCdp('Runtime.evaluate', {
@@ -152,7 +182,21 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
       return res.result?.value;
     };
 
-    const result = await fn({ sendCdp, evaluate });
+    const waitForAppReady = async (timeoutMs = 8000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const ready = await evaluate(
+          `Boolean(window.__chartCopilot && window.__chartCopilot.chart && window.__chartCopilot.chart.candles && window.__chartCopilot.chart.candles.length > 0)`
+        );
+        if (ready) return;
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      throw new Error('Timed out waiting for window.__chartCopilot initial chart load');
+    };
+
+    await waitForAppReady();
+
+    const result = await fn({ sendCdp, evaluate, consoleErrors, pageExceptions });
     ws.close();
     return result;
   } finally {
@@ -164,6 +208,7 @@ async function withCdpPage(chromeBin, targetUrl, fn) {
 
 module.exports = {
   findChromiumBinary,
-  startAppServer,
+  startMockAppServer,
+  makeMockCandles,
   withCdpPage
 };

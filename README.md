@@ -70,6 +70,7 @@ npm test
 
 # 运行无头 Chromium 浏览器端到端验证（XSS 防护、状态徽标与水印、Lightweight Charts 渲染与 IST 时区）
 # 如环境未安装 Chromium/Chrome，脚本会输出明确提示并自动跳过（退出码 0）。
-# 可通过 CHROMIUM_BIN=/path/to/chromium 指定浏览器可执行文件，或 SCREENSHOT_DIR=/path/to/dir 保存截图。
-npm run test:browser
+# 推荐串行运行全部单元测试与无头浏览器验证（避免并行启动 Chromium 造成性能基准 CPU 争抢）：
+npm test && npm run test:browser
 ```
+
