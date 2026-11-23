@@ -752,6 +752,8 @@ test('M2.15 (M2.2 C) Real-time tick update path (lwcChartEngine.updateLiveCandle
       createPriceLine: () => ({}),
       removePriceLine: () => {},
       priceScale: () => ({ applyOptions: () => {}, setAutoScale: () => {}, width: () => 78 }),
+      attachPrimitive: () => {},
+      detachPrimitive: () => {},
       priceToCoordinate: () => 100,
       coordinateToPrice: () => 1350
     };
@@ -838,10 +840,11 @@ test('M2.15 (M2.2 C) Real-time tick update path (lwcChartEngine.updateLiveCandle
   try {
     const { ChartEngine } = await import('../public/js/lwcChartEngine.js');
     const stage = makeMockEl('div');
-    const canvas = makeMockEl('canvas');
-    canvas.parentElement = stage;
+    const container = makeMockEl('div');
+    container.id = 'lwcChartContainer';
+    container.parentElement = stage;
 
-    const engine = new ChartEngine(canvas);
+    const engine = new ChartEngine(container);
     const fixturePath = path.join(__dirname, 'fixtures', 'india-daily-klines.json');
     const base = JSON.parse(fs.readFileSync(fixturePath, 'utf8')).fixtures['RELIANCE.NS'].candles.slice(-80);
 

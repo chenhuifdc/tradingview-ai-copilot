@@ -81,12 +81,11 @@ class ChartCopilotApp {
       apiStatusLabel: document.getElementById('apiStatusLabel'),
       btnToggleCopilot: document.getElementById('btnToggleCopilot'),
 
-      toolBtns: document.querySelectorAll('[data-draw-tool]'),
       btnToggleAiLayer: document.getElementById('btnToggleAiLayer'),
       btnQuickSnapshot: document.getElementById('btnQuickSnapshot'),
       btnClearDrawings: document.getElementById('btnClearDrawings'),
 
-      chartCanvas: document.getElementById('mainChartCanvas'),
+      chartContainer: document.getElementById('lwcChartContainer'),
       hudTitle: document.getElementById('hudInstrumentTitle'),
       hudExchange: document.getElementById('hudExchangeBadge'),
       hudDataStatusBadge: document.getElementById('hudDataStatusBadge'),
@@ -147,11 +146,8 @@ class ChartCopilotApp {
   }
 
   _initModules() {
-    this.chart = new ChartEngine(this.el.chartCanvas, {
-      onHoverChange: ({ candle, prevClose, index }) => this._updateOHLCVHud(candle, prevClose, index),
-      onToolChange: (tool) => {
-        this.el.toolBtns.forEach((b) => b.classList.toggle('active', b.dataset.drawTool === tool));
-      }
+    this.chart = new ChartEngine(this.el.chartContainer, {
+      onHoverChange: ({ candle, prevClose, index }) => this._updateOHLCVHud(candle, prevClose, index)
     });
     this.chart.setEmaConfig({ showEMA: this.showEMA, periods: this.emaPeriods });
 
@@ -174,7 +170,7 @@ class ChartCopilotApp {
     });
 
     const ro = new ResizeObserver(() => this.chart.resize());
-    ro.observe(this.el.chartCanvas.parentElement);
+    ro.observe(this.el.chartContainer.parentElement);
   }
 
   _applyTheme(theme) {
@@ -229,7 +225,6 @@ class ChartCopilotApp {
       this.copilot.setDataMeta(this.lastFeedMeta);
 
       this.chart.clearAIAnnotations();
-      this.chart.clearManualDrawings();
       this._hideAiLayerBar();
 
       this.chart.setData({
@@ -829,14 +824,6 @@ class ChartCopilotApp {
       this._applyTheme(this.theme === 'light' ? 'dark' : 'light');
     });
 
-    this.el.toolBtns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const tool = btn.dataset.drawTool;
-        this.chart.setTool(tool);
-        this.el.toolBtns.forEach((b) => b.classList.toggle('active', b === btn));
-      });
-    });
-
     this.el.btnToggleAiLayer.addEventListener('click', () => {
       this.chart.showAIAnnotations = !this.chart.showAIAnnotations;
       this.el.btnToggleAiLayer.classList.toggle('active', this.chart.showAIAnnotations);
@@ -859,7 +846,6 @@ class ChartCopilotApp {
     });
 
     this.el.btnClearDrawings.addEventListener('click', () => {
-      this.chart.clearManualDrawings();
       this.chart.clearAIAnnotations();
       this._hideAiLayerBar();
     });

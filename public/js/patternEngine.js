@@ -509,8 +509,20 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
     const weeklyTouches = c.points.filter((p) => p.source === 'weekly').length;
     const hasConfluence = dailyTouches > 0 && weeklyTouches > 0;
     const totalWeight = c.points.reduce((s, p) => s + p.weight, 0);
-    const roundedCenter = roundToTick(c.meanPrice, tickSize);
-    const role = roundedCenter <= currentPrice ? 'support' : 'resistance';
+    const meanSide = c.meanPrice <= currentPrice ? 'support' : 'resistance';
+    const sameSidePts = c.points.filter((p) => (meanSide === 'support' ? p.price <= currentPrice : p.price > currentPrice));
+    const snapPool = sameSidePts.length ? sameSidePts : c.points;
+    let bestAnchorPt = snapPool[0];
+    let bestDist = Math.abs(bestAnchorPt.price - c.meanPrice);
+    for (let k = 1; k < snapPool.length; k++) {
+      const d = Math.abs(snapPool[k].price - c.meanPrice);
+      if (d < bestDist || (Math.abs(d - bestDist) < 1e-9 && snapPool[k].index > bestAnchorPt.index)) {
+        bestAnchorPt = snapPool[k];
+        bestDist = d;
+      }
+    }
+    const snappedPrice = bestAnchorPt.price;
+    const role = snappedPrice <= currentPrice ? 'support' : 'resistance';
 
     const sortedByIndex = [...c.points].sort(
       (a, b) => a.index - b.index || String(a.time).localeCompare(String(b.time))
@@ -519,7 +531,7 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
     const lastPt = sortedByIndex[sortedByIndex.length - 1];
 
     // Smooth non-saturating sub-scores (theoretical ceiling = 0.98 < 1.0)
-    const distanceAtr = Math.abs(currentPrice - roundedCenter) / Math.max(1e-9, latestAtr);
+    const distanceAtr = Math.abs(currentPrice - snappedPrice) / Math.max(1e-9, latestAtr);
     const distanceSub = Math.exp(-distanceAtr / scCfg.distanceAtrDecay);
     const touchSub = 1 - Math.exp(-c.points.length / scCfg.touchScale);
     const confluenceSub = hasConfluence ? 1.0 : (weeklyTouches > 0 ? 0.55 : 0.0);
@@ -535,33 +547,42 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
       scCfg.weightQuality * qualitySub;
     const score = clampScore(rawScore);
 
+    const priceAnchor = {
+      index: bestAnchorPt.index,
+      time: candles[bestAnchorPt.index].time,
+      price: snappedPrice,
+      polarity: bestAnchorPt.polarity,
+      source: bestAnchorPt.source
+    };
     const startAnchor = {
       index: firstPt.index,
       time: candles[firstPt.index].time,
-      price: roundedCenter
+      price: firstPt.price,
+      polarity: firstPt.polarity
     };
     const endAnchor = {
       index: lastPt.index,
       time: candles[lastPt.index].time,
-      price: roundedCenter
+      price: lastPt.price,
+      polarity: lastPt.polarity
     };
     const anchors = sortedByIndex.map((p) => ({
       index: p.index,
       time: candles[p.index].time,
-      price: roundToTick(p.price, tickSize),
+      price: p.price,
       source: p.source,
       polarity: p.polarity
     }));
 
-    const id = `sr_${role}_${roundedCenter.toFixed(2)}_${startAnchor.index}_${startAnchor.time}_${endAnchor.index}_${endAnchor.time}`;
+    const id = `sr_${role}_${snappedPrice.toFixed(2)}_${startAnchor.index}_${startAnchor.time}_${endAnchor.index}_${endAnchor.time}`;
 
     return {
       id,
       type: 'support_resistance',
       role,
-      price: roundedCenter,
-      bandLow: roundToTick(Math.min(...prices), tickSize),
-      bandHigh: roundToTick(Math.max(...prices), tickSize),
+      price: snappedPrice,
+      bandLow: Math.min(...prices),
+      bandHigh: Math.max(...prices),
       distanceAtr: Number(distanceAtr.toFixed(3)),
       touches: c.points.length,
       dailyTouches,
@@ -577,6 +598,7 @@ export function detectSupportResistanceClusters(rawCandles, options = {}) {
       startTime: startAnchor.time,
       endIndex: endAnchor.index,
       endTime: endAnchor.time,
+      priceAnchor,
       startAnchor,
       endAnchor,
       anchors
@@ -697,7 +719,7 @@ export function detectTrendlines(rawCandles, swingsInput, options = {}) {
             touchedPoints.push({
               index: pt.index,
               time: candles[pt.index].time,
-              price: roundToTick(pt.price, tickSize),
+              price: pt.price,
               linePrice: roundToTick(linePrice, tickSize),
               polarity: pt.polarity
             });
@@ -712,13 +734,13 @@ export function detectTrendlines(rawCandles, swingsInput, options = {}) {
         const startAnchor = {
           index: p1.index,
           time: candles[p1.index].time,
-          price: roundToTick(p1.price, tickSize),
+          price: p1.price,
           polarity: p1.polarity
         };
         const endAnchor = {
           index: p2.index,
           time: candles[p2.index].time,
-          price: roundToTick(p2.price, tickSize),
+          price: p2.price,
           polarity: p2.polarity
         };
 
@@ -847,6 +869,10 @@ export function detectBoxRanges(rawCandles, options = {}) {
       let firstLowerTouchIndex = -1;
       let upperTouchIndex = start;
       let lowerTouchIndex = start;
+      let bestUpperIdx = start;
+      let bestUpperDist = Infinity;
+      let bestLowerIdx = start;
+      let bestLowerDist = Infinity;
       let outsideCloses = 0;
 
       for (let idx = start; idx <= end; idx++) {
@@ -854,11 +880,21 @@ export function detectBoxRanges(rawCandles, options = {}) {
           if (firstUpperTouchIndex === -1) firstUpperTouchIndex = idx;
           upperTouches++;
           upperTouchIndex = idx;
+          const dUp = Math.abs(highsArr[idx] - upper);
+          if (dUp <= bestUpperDist) {
+            bestUpperDist = dUp;
+            bestUpperIdx = idx;
+          }
         }
         if (lowsArr[idx] <= lowerThresh) {
           if (firstLowerTouchIndex === -1) firstLowerTouchIndex = idx;
           lowerTouches++;
           lowerTouchIndex = idx;
+          const dLo = Math.abs(lowsArr[idx] - lower);
+          if (dLo <= bestLowerDist) {
+            bestLowerDist = dLo;
+            bestLowerIdx = idx;
+          }
         }
         const cl = closesArr[idx];
         if (cl > closeMax || cl < closeMin) {
@@ -874,28 +910,32 @@ export function detectBoxRanges(rawCandles, options = {}) {
         firstLowerTouchIndex < upperTouchIndex;
 
       if (upperTouches >= 2 && lowerTouches >= 2 && outsideCloses <= maxOutside && hasHorizontalOscillation) {
-        const roundedUpper = roundToTick(upper, tickSize);
-        const roundedLower = roundToTick(lower, tickSize);
+        const snappedUpper = highsArr[bestUpperIdx];
+        const snappedLower = lowsArr[bestLowerIdx];
+        if (snappedUpper <= snappedLower) continue;
+
         const startAnchor = {
           index: start,
           time: candles[start].time,
-          price: roundedLower
+          price: candles[start].low,
+          polarity: 'low'
         };
         const endAnchor = {
           index: end,
           time: candles[end].time,
-          price: roundedUpper
+          price: candles[end].high,
+          polarity: 'high'
         };
         const upperAnchor = {
-          index: upperTouchIndex,
-          time: candles[upperTouchIndex].time,
-          price: roundedUpper,
+          index: bestUpperIdx,
+          time: candles[bestUpperIdx].time,
+          price: snappedUpper,
           polarity: 'high'
         };
         const lowerAnchor = {
-          index: lowerTouchIndex,
-          time: candles[lowerTouchIndex].time,
-          price: roundedLower,
+          index: bestLowerIdx,
+          time: candles[bestLowerIdx].time,
+          price: snappedLower,
           polarity: 'low'
         };
 
@@ -925,10 +965,10 @@ export function detectBoxRanges(rawCandles, options = {}) {
           endAnchor,
           upperAnchor,
           lowerAnchor,
-          anchors: [startAnchor, endAnchor, upperAnchor, lowerAnchor],
-          upperBound: roundedUpper,
-          lowerBound: roundedLower,
-          midPrice: roundToTick(mid, tickSize),
+          anchors: [upperAnchor, lowerAnchor],
+          upperBound: snappedUpper,
+          lowerBound: snappedLower,
+          midPrice: roundToTick((snappedUpper + snappedLower) * 0.5, tickSize),
           heightPct: Number((heightPct * 100).toFixed(2)),
           upperTouches,
           lowerTouches,
@@ -1000,14 +1040,14 @@ export function detectMacdDivergences(rawCandles, swingsInput, options = {}) {
       const startAnchor = {
         index: p1.index,
         time: candles[p1.index].time,
-        price: roundToTick(p1.price, tickSize),
+        price: p1.price,
         macd: Number(m1.toFixed(4)),
         polarity: 'low'
       };
       const endAnchor = {
         index: p2.index,
         time: candles[p2.index].time,
-        price: roundToTick(p2.price, tickSize),
+        price: p2.price,
         macd: Number(m2.toFixed(4)),
         polarity: 'low'
       };
@@ -1065,14 +1105,14 @@ export function detectMacdDivergences(rawCandles, swingsInput, options = {}) {
       const startAnchor = {
         index: p1.index,
         time: candles[p1.index].time,
-        price: roundToTick(p1.price, tickSize),
+        price: p1.price,
         macd: Number(m1.toFixed(4)),
         polarity: 'high'
       };
       const endAnchor = {
         index: p2.index,
         time: candles[p2.index].time,
-        price: roundToTick(p2.price, tickSize),
+        price: p2.price,
         macd: Number(m2.toFixed(4)),
         polarity: 'high'
       };
@@ -1144,7 +1184,8 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
       role,
       index: swingPt.index,
       time: candles[swingPt.index].time,
-      price: roundToTick(swingPt.price, tickSize)
+      price: swingPt.price,
+      polarity: swingPt.polarity
     };
   }
 
@@ -1350,6 +1391,7 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
           const score = clampScore(0.32 * convSub + 0.28 * recencySub + 0.18 * spanSub + 0.18 * proxSub);
           const id = `pat_${subtype}_${startIdx}_${candles[startIdx].time}_${endIdx}_${candles[endIdx].time}`;
 
+          const sortedTriPts = [...points].sort((a, b) => a.index - b.index);
           patterns.push({
             id,
             type: subtype,
@@ -1364,16 +1406,8 @@ export function detectChartPatterns(rawCandles, swingsInput, options = {}) {
             endIndex: endIdx,
             startTime: candles[startIdx].time,
             endTime: candles[endIdx].time,
-            startAnchor: {
-              index: startIdx,
-              time: candles[startIdx].time,
-              price: roundToTick(candles[startIdx].close, tickSize)
-            },
-            endAnchor: {
-              index: endIdx,
-              time: candles[endIdx].time,
-              price: roundToTick(candles[endIdx].close, tickSize)
-            },
+            startAnchor: sortedTriPts[0],
+            endAnchor: sortedTriPts[sortedTriPts.length - 1],
             points,
             anchors: points,
             score

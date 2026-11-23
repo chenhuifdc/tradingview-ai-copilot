@@ -1,10 +1,15 @@
 /**
- * TradingView Lightweight Charts™ v5.2.1 Rendering Engine for ChartCopilot (M1 / M1.1).
+ * TradingView Lightweight Charts™ v5.2.1 Rendering Engine for ChartCopilot (M1 / M1.1 / M3).
+ *
+ * M3 Upgrade:
+ * - Completely removes the transitional #mainChartCanvas overlay and manual drawing code.
+ * - Attaches a native LWC v5.2.1 ISeriesPrimitive (AIAnnotationSeriesPrimitive) onto candleSeries
+ *   so all AI annotations render in data-coordinate bitmap space, automatically stay 100% locked
+ *   through pan/zoom/resize, and are natively captured by lwcChart.takeScreenshot().
  */
 
 import {
   computeAllIndicators,
-  formatPrice,
   getPrecision,
   getEmaColor
 } from './indicators.js';
@@ -20,7 +25,7 @@ import {
   toLwcMacdData,
   toLwcRealtimeUpdate
 } from './lwcAdapter.js';
-import { drawAnnotationsLayer } from './chartEngine.js';
+import { AIAnnotationSeriesPrimitive } from './lwcAnnotationPrimitive.js';
 
 const THEMES = {
   light: {
@@ -72,10 +77,8 @@ const THEMES = {
 };
 
 export class ChartEngine {
-  constructor(canvasOrContainer, options = {}) {
+  constructor(containerOrStage, options = {}) {
     this.onHoverChange = options.onHoverChange || (() => {});
-    this.onDrawingsChange = options.onDrawingsChange || (() => {});
-    this.onToolChange = options.onToolChange || (() => {});
 
     this.theme = 'light';
     this.lang = 'zh-CN';
@@ -96,7 +99,7 @@ export class ChartEngine {
     this._showBoll = false;
     this._showLuxSR = true;
     this.emaPeriods = [5, 10, 20];
-    this.showAIAnnotations = true;
+    this._showAIAnnotations = true;
 
     this.priceAxisWidth = 78;
     this.timeAxisHeight = 28;
@@ -105,9 +108,6 @@ export class ChartEngine {
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     this.mouse = { x: -1, y: -1, inside: false };
-    this.activeTool = 'crosshair';
-    this.pendingDrawing = null;
-    this.manualDrawings = [];
 
     this.aiAnnotations = null;
     this.aiLayerFlags = {
@@ -122,6 +122,7 @@ export class ChartEngine {
 
     this.lwcChart = null;
     this.candleSeries = null;
+    this.annotationPrimitive = null;
     this.volumeSeries = null;
     this.emaSeriesMap = new Map();
     this.bollUpperSeries = null;
@@ -132,9 +133,8 @@ export class ChartEngine {
     this.macdLineSeries = null;
     this.macdSignalSeries = null;
 
-    this._initDOM(canvasOrContainer);
+    this._initDOM(containerOrStage);
     this._initLwcChart();
-    this._bindOverlayEvents();
     this.resize();
   }
 
@@ -170,37 +170,29 @@ export class ChartEngine {
     this._syncLuxPriceLines();
   }
 
-  _initDOM(canvasOrContainer) {
-    const isCanvas = canvasOrContainer?.tagName === 'CANVAS';
-    this.stageEl = isCanvas ? canvasOrContainer.parentElement : canvasOrContainer;
+  get showAIAnnotations() { return this._showAIAnnotations; }
+  set showAIAnnotations(val) {
+    this._showAIAnnotations = Boolean(val);
+    this.annotationPrimitive?.setVisible(this._showAIAnnotations);
+    this._syncLuxPriceLines();
+  }
 
-    let container = this.stageEl.querySelector('#lwcChartContainer');
-    if (!container) {
-      container = document.createElement('div');
-      container.id = 'lwcChartContainer';
-      container.className = 'lwc-chart-container';
-      container.setAttribute('aria-label', 'Lightweight Charts K线与MACD主副图容器');
-      if (isCanvas) {
-        this.stageEl.insertBefore(container, canvasOrContainer);
-      } else {
-        this.stageEl.appendChild(container);
-      }
-    }
-    this.container = container;
-
-    if (isCanvas) {
-      this.canvas = canvasOrContainer;
+  _initDOM(containerOrStage) {
+    if (containerOrStage?.id === 'lwcChartContainer') {
+      this.container = containerOrStage;
+      this.stageEl = containerOrStage.parentElement || containerOrStage;
     } else {
-      let c = this.stageEl.querySelector('#mainChartCanvas');
-      if (!c) {
-        c = document.createElement('canvas');
-        c.id = 'mainChartCanvas';
-        this.stageEl.appendChild(c);
+      this.stageEl = containerOrStage;
+      let container = this.stageEl?.querySelector?.('#lwcChartContainer');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'lwcChartContainer';
+        container.className = 'lwc-chart-container';
+        container.setAttribute('aria-label', 'Lightweight Charts K线与MACD主副图容器');
+        this.stageEl?.appendChild?.(container);
       }
-      this.canvas = c;
+      this.container = container;
     }
-    this.canvas.classList.add('lwc-annotation-overlay');
-    this.ctx = this.canvas.getContext('2d');
   }
 
   _initLwcChart() {
@@ -266,7 +258,7 @@ export class ChartEngine {
         borderColor: palette.paneBorder,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 8,
+        rightOffset: 12,
         barSpacing: 8.5,
         minBarSpacing: 2,
         tickMarkFormatter: (time, tickMarkType) =>
@@ -291,6 +283,17 @@ export class ChartEngine {
       },
       0
     );
+
+    // Attach M3 native Series Primitive directly onto candlestick series (zero overlay canvas!)
+    this.annotationPrimitive = new AIAnnotationSeriesPrimitive({
+      theme: this.theme,
+      precision: this.precision,
+      layers: this.aiLayerFlags,
+      visible: this._showAIAnnotations
+    });
+    if (typeof this.candleSeries?.attachPrimitive === 'function') {
+      this.candleSeries.attachPrimitive(this.annotationPrimitive);
+    }
 
     this.volumeSeries = this.lwcChart.addSeries(
       LWC.HistogramSeries,
@@ -376,13 +379,6 @@ export class ChartEngine {
         this.onHoverChange({ candle: c, prevClose: prev.close, index: idx });
       }
     });
-
-    this.lwcChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-      this._renderOverlayCanvas();
-    });
-    this.lwcChart.timeScale().subscribeSizeChange(() => {
-      this._renderOverlayCanvas();
-    });
   }
 
   _createMacdSeriesIfNeeded() {
@@ -455,7 +451,6 @@ export class ChartEngine {
     if (!this.lwcChart) return;
     if (!this._showMACD) {
       this._removeMacdSeries();
-      this._renderOverlayCanvas();
       return;
     }
 
@@ -467,12 +462,10 @@ export class ChartEngine {
       this.macdLineSeries?.setData(macdData.macdLine);
       this.macdSignalSeries?.setData(macdData.signalLine);
     }
-    this._renderOverlayCanvas();
   }
 
   _syncEmaSeries() {
     if (!this.lwcChart) return;
-    const LWC = this.LWC;
     const activeSet = new Set(this._showEMA ? this.emaPeriods : []);
 
     for (const [period, series] of this.emaSeriesMap.entries()) {
@@ -482,17 +475,16 @@ export class ChartEngine {
       }
     }
 
-    if (!this._showEMA || !this.emaPeriods.length) return;
+    if (!this._showEMA) return;
 
     for (const period of this.emaPeriods) {
       let series = this.emaSeriesMap.get(period);
-      const color = getEmaColor(period);
       if (!series) {
         series = this.lwcChart.addSeries(
-          LWC.LineSeries,
+          this.LWC.LineSeries,
           {
-            color,
-            lineWidth: 1.6,
+            color: getEmaColor(period),
+            lineWidth: period >= 60 ? 1.5 : 1.25,
             priceLineVisible: false,
             lastValueVisible: false,
             crosshairMarkerVisible: false
@@ -500,13 +492,9 @@ export class ChartEngine {
           0
         );
         this.emaSeriesMap.set(period, series);
-      } else {
-        series.applyOptions({ color, visible: true });
       }
-
       if (this.candles.length && this.indicators?.emaMap?.[period]) {
-        const lineData = toLwcLineData(this.candles, this.indicators.emaMap[period]);
-        series.setData(lineData);
+        series.setData(toLwcLineData(this.candles, this.indicators.emaMap[period]));
       }
     }
   }
@@ -532,7 +520,8 @@ export class ChartEngine {
     }
     this.luxPriceLines = [];
 
-    if (!this._showLuxSR || !this.indicators?.luxSR) return;
+    // Suppress competing LuxAlgo Auto S&R lines while M3 AI annotations are visible
+    if (!this._showLuxSR || !this.indicators?.luxSR || (this._showAIAnnotations && this.aiAnnotations)) return;
     const palette = THEMES[this.theme] || THEMES.light;
     const { currentResistance, currentSupport } = this.indicators.luxSR;
 
@@ -617,12 +606,11 @@ export class ChartEngine {
       this._syncLuxPriceLines();
     }
 
-    this._renderOverlayCanvas();
+    this.annotationPrimitive?.setTheme(this.theme);
   }
 
   setLanguage(lang) {
     this.lang = lang || 'zh-CN';
-    this._renderOverlayCanvas();
   }
 
   setEmaConfig({ showEMA, periods } = {}) {
@@ -636,18 +624,6 @@ export class ChartEngine {
       this.indicators = computeAllIndicators(this.candles, this.emaPeriods);
     }
     this._syncEmaSeries();
-    this._renderOverlayCanvas();
-  }
-
-  setTool(tool) {
-    this.activeTool = tool || 'crosshair';
-    this.pendingDrawing = null;
-    if (this.canvas) {
-      this.canvas.style.pointerEvents = this.activeTool === 'crosshair' ? 'none' : 'auto';
-      this.canvas.style.cursor = this.activeTool === 'crosshair' ? 'default' : 'cell';
-    }
-    this.onToolChange(this.activeTool);
-    this._renderOverlayCanvas();
   }
 
   setData({ candles, events, instrument, interval }) {
@@ -687,6 +663,7 @@ export class ChartEngine {
     this.candleSeries?.applyOptions({
       priceFormat: { type: 'price', precision: this.precision, minMove }
     });
+    this.annotationPrimitive?.setPrecision(this.precision);
 
     const isIntraday = ['1m', '5m', '15m', '1h', '4h'].includes(this.interval);
     this.lwcChart?.applyOptions({
@@ -724,7 +701,6 @@ export class ChartEngine {
     this._syncMacdPane();
 
     this.fitDefaultZoom();
-    this._renderOverlayCanvas();
   }
 
   updateLiveCandle(candle) {
@@ -812,35 +788,42 @@ export class ChartEngine {
       if (Number.isFinite(mVal)) try { this.macdLineSeries?.update({ time: latestTime, value: mVal }); } catch { /* ignore */ }
       if (Number.isFinite(sVal)) try { this.macdSignalSeries?.update({ time: latestTime, value: sVal }); } catch { /* ignore */ }
     }
-
-    this._renderOverlayCanvas();
   }
 
   setAIAnnotations(annotations) {
-    this.aiAnnotations = annotations;
-    this.showAIAnnotations = true;
-    this._renderOverlayCanvas();
+    this.aiAnnotations = annotations || null;
+    this._showAIAnnotations = true;
+    this._syncLuxPriceLines();
+    this.annotationPrimitive?.setAnnotations(this.aiAnnotations, {
+      theme: this.theme,
+      precision: this.precision,
+      layers: this.aiLayerFlags,
+      visible: true
+    });
   }
 
   clearAIAnnotations() {
     this.aiAnnotations = null;
-    this._renderOverlayCanvas();
+    this.highlightPrice = null;
+    if (this.highlightTimer) {
+      clearTimeout(this.highlightTimer);
+      this.highlightTimer = null;
+    }
+    this.annotationPrimitive?.clear();
+    this._syncLuxPriceLines();
   }
 
-  clearManualDrawings() {
-    this.manualDrawings = [];
-    this.pendingDrawing = null;
-    this.onDrawingsChange(this.manualDrawings);
-    this._renderOverlayCanvas();
+  getAnnotationLayout() {
+    return this.annotationPrimitive?.getLastRenderedLayout() || null;
   }
 
-  flashPriceLevel(price) {
+  highlightLevel(price) {
     this.highlightPrice = price;
     if (this.highlightTimer) clearTimeout(this.highlightTimer);
-    this._renderOverlayCanvas();
+    this.annotationPrimitive?.setHighlightPrice(price);
     this.highlightTimer = setTimeout(() => {
       this.highlightPrice = null;
-      this._renderOverlayCanvas();
+      this.annotationPrimitive?.setHighlightPrice(null);
     }, 2400);
   }
 
@@ -850,10 +833,9 @@ export class ChartEngine {
     const visibleBars = Math.min(Math.max(n, 60), 120);
     this.lwcChart.timeScale().setVisibleLogicalRange({
       from: Math.max(0, n - visibleBars),
-      to: n - 1 + 6
+      to: n - 1 + 12
     });
     this.candleSeries?.priceScale().setAutoScale(true);
-    this._renderOverlayCanvas();
   }
 
   zoomBy(factor) {
@@ -868,7 +850,6 @@ export class ChartEngine {
       from: center - nextSpan * 0.75,
       to: center + nextSpan * 0.25
     });
-    this._renderOverlayCanvas();
   }
 
   resize() {
@@ -881,15 +862,6 @@ export class ChartEngine {
     if (this.lwcChart) {
       this.lwcChart.resize(this.width, this.height, true);
     }
-
-    if (this.canvas) {
-      this.canvas.width = Math.floor(this.width * this.dpr);
-      this.canvas.height = Math.floor(this.height * this.dpr);
-      this.canvas.style.width = `${this.width}px`;
-      this.canvas.style.height = `${this.height}px`;
-    }
-
-    this._renderOverlayCanvas();
   }
 
   getGeometry() {
@@ -1005,37 +977,41 @@ export class ChartEngine {
 
   captureSnapshot({ includeCurrentAI = false } = {}) {
     const geo = this.getGeometry();
-    const scale = 2;
-    const offscreen = document.createElement('canvas');
-    offscreen.width = Math.floor(this.width * scale);
-    offscreen.height = Math.floor(this.height * scale);
-    const octx = offscreen.getContext('2d');
-
-    if (this.lwcChart && typeof this.lwcChart.takeScreenshot === 'function') {
-      const shotCanvas = this.lwcChart.takeScreenshot(true, false);
-      octx.drawImage(shotCanvas, 0, 0, offscreen.width, offscreen.height);
+    const prevVis = this._showAIAnnotations;
+    const wantAI = Boolean(includeCurrentAI && this.aiAnnotations);
+    if (this.annotationPrimitive && prevVis !== wantAI) {
+      this.annotationPrimitive.setVisible(wantAI);
     }
 
-    octx.save();
-    octx.scale(scale, scale);
-    this._drawManualDrawings(octx, geo);
-    if (includeCurrentAI && this.aiAnnotations) {
-      drawAnnotationsLayer(octx, geo, this.aiAnnotations, {
-        layers: this.aiLayerFlags,
-        highlightPrice: this.highlightPrice,
-        lang: this.lang
-      });
+    let cleanDataUrl = '';
+    let shotWidth = this.width;
+    let shotHeight = this.height;
+    let dprUsed = this.dpr;
+
+    try {
+      if (this.lwcChart && typeof this.lwcChart.takeScreenshot === 'function') {
+        const shotCanvas = this.lwcChart.takeScreenshot(true, false);
+        shotWidth = shotCanvas.width;
+        shotHeight = shotCanvas.height;
+        dprUsed = this.width > 0 ? shotCanvas.width / this.width : this.dpr;
+        cleanDataUrl = shotCanvas.toDataURL('image/png');
+      }
+    } finally {
+      if (this.annotationPrimitive && prevVis !== wantAI) {
+        this.annotationPrimitive.setVisible(prevVis);
+      }
     }
-    octx.restore();
 
     const lastCandle = this.candles.length ? { ...this.candles[this.candles.length - 1] } : null;
     const prevCandle = this.candles.length > 1 ? { ...this.candles[this.candles.length - 2] } : lastCandle;
 
     return {
-      cleanDataUrl: offscreen.toDataURL('image/png'),
+      cleanDataUrl,
       width: this.width,
       height: this.height,
-      dpr: scale,
+      bitmapWidth: shotWidth,
+      bitmapHeight: shotHeight,
+      dpr: dprUsed,
       geometry: geo,
       visibleStart: geo.visibleStart,
       visibleEnd: geo.visibleEnd,
@@ -1053,135 +1029,7 @@ export class ChartEngine {
     this._syncBollingerSeries();
     this._syncLuxPriceLines();
     this._syncMacdPane();
-    this._renderOverlayCanvas();
-  }
-
-  _renderOverlayCanvas() {
-    if (!this.ctx || !this.canvas) return;
-    this.ctx.save();
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.ctx.clearRect(0, 0, this.width, this.height);
-
-    if (this.candles.length) {
-      const geo = this.getGeometry();
-      this._drawManualDrawings(this.ctx, geo);
-      if (this.showAIAnnotations && this.aiAnnotations) {
-        drawAnnotationsLayer(this.ctx, geo, this.aiAnnotations, {
-          layers: this.aiLayerFlags,
-          highlightPrice: this.highlightPrice,
-          lang: this.lang
-        });
-      }
-    }
-    this.ctx.restore();
-  }
-
-  _drawManualDrawings(ctx, geo) {
-    const list = this.pendingDrawing ? [...this.manualDrawings, this.pendingDrawing] : this.manualDrawings;
-    if (!list.length) return;
-    const { plotWidth, mainHeight, indexToX, priceToY, precision } = geo;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, plotWidth, mainHeight);
-    ctx.clip();
-
-    for (const d of list) {
-      ctx.save();
-      if (d.type === 'hline') {
-        const y = priceToY(d.price);
-        ctx.strokeStyle = '#ff9800';
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(plotWidth, y);
-        ctx.stroke();
-        ctx.fillStyle = '#ff9800';
-        ctx.font = '600 10.5px ui-monospace, monospace';
-        ctx.fillText(`手动水平线 ${formatPrice(d.price, precision)}`, 10, y - 6);
-      } else if (d.type === 'trendline') {
-        const x1 = indexToX(d.startIndex);
-        const y1 = priceToY(d.startPrice);
-        const x2 = indexToX(d.endIndex);
-        const y2 = priceToY(d.endPrice);
-        ctx.strokeStyle = '#ff9800';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
-      } else if (d.type === 'box' || d.type === 'measure') {
-        const x1 = indexToX(d.startIndex);
-        const y1 = priceToY(d.startPrice);
-        const x2 = indexToX(d.endIndex);
-        const y2 = priceToY(d.endPrice);
-        const isUp = d.endPrice >= d.startPrice;
-        const color = d.type === 'measure' ? (isUp ? '#089981' : '#f23645') : '#2962ff';
-        ctx.fillStyle = d.type === 'measure'
-          ? (isUp ? 'rgba(8, 153, 129, 0.14)' : 'rgba(242, 54, 69, 0.14)')
-          : 'rgba(41, 98, 255, 0.12)';
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.3;
-        ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
-        ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
-      }
-      ctx.restore();
-    }
-
-    ctx.restore();
-  }
-
-  _bindOverlayEvents() {
-    if (!this.canvas) return;
-    const getPos = (e) => {
-      const rect = this.canvas.getBoundingClientRect();
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    };
-
-    this.canvas.addEventListener('mousemove', (e) => {
-      if (this.activeTool === 'crosshair' || !this.pendingDrawing) return;
-      const pos = getPos(e);
-      const geo = this.getGeometry();
-      if (pos.x <= geo.plotWidth && pos.y <= geo.mainHeight) {
-        this.pendingDrawing.endIndex = geo.xToIndex(pos.x);
-        this.pendingDrawing.endPrice = geo.yToPrice(pos.y);
-        this._renderOverlayCanvas();
-      }
-    });
-
-    this.canvas.addEventListener('mousedown', (e) => {
-      if (e.button !== 0 || this.activeTool === 'crosshair') return;
-      const pos = getPos(e);
-      const geo = this.getGeometry();
-      if (pos.x > geo.plotWidth || pos.y > geo.mainHeight) return;
-
-      const idx = geo.xToIndex(pos.x);
-      const price = geo.yToPrice(pos.y);
-
-      if (this.activeTool === 'hline') {
-        this.manualDrawings.push({ type: 'hline', price });
-        this.onDrawingsChange(this.manualDrawings);
-        this.setTool('crosshair');
-        return;
-      }
-
-      if (!this.pendingDrawing) {
-        this.pendingDrawing = {
-          type: this.activeTool,
-          startIndex: idx,
-          startPrice: price,
-          endIndex: idx,
-          endPrice: price
-        };
-        this._renderOverlayCanvas();
-      } else {
-        this.pendingDrawing.endIndex = idx;
-        this.pendingDrawing.endPrice = price;
-        this.manualDrawings.push({ ...this.pendingDrawing });
-        this.pendingDrawing = null;
-        this.onDrawingsChange(this.manualDrawings);
-        this.setTool('crosshair');
-      }
-    });
+    this.annotationPrimitive?.setLayers(this.aiLayerFlags);
+    this.annotationPrimitive?.setVisible(this._showAIAnnotations);
   }
 }

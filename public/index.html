@@ -148,42 +148,8 @@
 
     <!-- ================= MAIN WORKSPACE ================= -->
     <div class="workspace-body">
-      <!-- Left TradingView Drawing Rail -->
-      <aside class="left-rail" aria-label="画线工具栏">
-        <button type="button" class="rail-btn active" data-draw-tool="crosshair" title="十字光标">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <line x1="12" y1="3" x2="12" y2="21"></line>
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <circle cx="12" cy="12" r="2"></circle>
-          </svg>
-        </button>
-        <button type="button" class="rail-btn" data-draw-tool="trendline" title="手动绘制趋势线（点击两点）">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <line x1="5" y1="19" x2="19" y2="5"></line>
-            <circle cx="5" cy="19" r="2.2" fill="currentColor"></circle>
-            <circle cx="19" cy="5" r="2.2" fill="currentColor"></circle>
-          </svg>
-        </button>
-        <button type="button" class="rail-btn" data-draw-tool="hline" title="手动绘制水平支撑/压力线">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <circle cx="12" cy="12" r="2.2" fill="currentColor"></circle>
-          </svg>
-        </button>
-        <button type="button" class="rail-btn" data-draw-tool="box" title="手动绘制区间/形态框">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <rect x="4" y="6" width="16" height="12" rx="1.5"></rect>
-          </svg>
-        </button>
-        <button type="button" class="rail-btn" data-draw-tool="measure" title="涨跌幅与 K 线测距尺">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M4 18L18 4l2 2L6 20l-2-2z"></path>
-            <path d="M9 13l1.5 1.5M12 10l1.5 1.5M15 7l1.5 1.5"></path>
-          </svg>
-        </button>
-
-        <div class="rail-sep"></div>
-
+      <!-- Left AI Annotation & Snapshot Rail -->
+      <aside class="left-rail" aria-label="AI标注与截屏工具栏">
         <button id="btnToggleAiLayer" type="button" class="rail-btn active" title="显示 / 隐藏 AI 标注层">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <path d="M12 3l1.8 4.4L18.2 9.2l-4.4 1.8L12 15.4l-1.8-4.4-4.4-1.8 4.4-1.8L12 3z"></path>
@@ -195,7 +161,7 @@
             <circle cx="12" cy="13" r="4"></circle>
           </svg>
         </button>
-        <button id="btnClearDrawings" type="button" class="rail-btn danger" title="清除图表上所有 AI 及手动标注">
+        <button id="btnClearDrawings" type="button" class="rail-btn danger" title="清除全部 AI 标注">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <polyline points="3 6 5 6 21 6"></polyline>
             <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
@@ -227,8 +193,8 @@
           </div>
         </div>
 
-        <!-- Interactive Multi-Pane Canvas -->
-        <canvas id="mainChartCanvas" aria-label="实时K线与MACD图表画布"></canvas>
+        <!-- Native Lightweight Charts Multi-Pane Container (M3 Series Primitives render natively inside) -->
+        <div id="lwcChartContainer" class="lwc-chart-container" aria-label="Lightweight Charts K线与MACD主副图容器"></div>
 
         <!-- Floating AI Annotation Layer Filter Bar -->
         <div id="aiLayerBar" class="ai-layer-bar" role="toolbar" aria-label="AI标注图层筛选">

@@ -10,9 +10,9 @@
 import { formatPrice, formatTimeLabel } from './indicators.js';
 import {
   extractChartContext,
-  runLocalQuantitativeAnalysis,
-  analyzeTrendlinesAndPatterns
+  runLocalQuantitativeAnalysis
 } from './localAnalyzer.js';
+import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
 import { renderAnnotatedScreenshot, downloadDataUrl } from './screenshotAnnotator.js';
 import { getLangPack, getLangMeta } from './i18n.js';
 import { escapeHtml, sanitizeImageDataUrl, renderSafeMarkdown } from './sanitize.js';
@@ -604,21 +604,17 @@ function syncAnnotationsWithReport(rawAnn, reportText, ctx, chartLang = 'zh-CN')
     ann.horizontalLevels = syncedLevels;
   }
 
-  // 2) Ensure technical pattern & trendlines match what the report analyzed
-  const mentionedPattern = detectPatternNameFromText(reportText);
+  // 2) Source trendlines & patterns exclusively from deterministic patternEngine candidates
   if (!ann.patterns.length || !ann.trendlines.length) {
-    const detected = analyzeTrendlinesAndPatterns(ctx, chartLang);
-    if (!ann.trendlines.length) ann.trendlines = detected.trendlines;
-    if (!ann.patterns.length) ann.patterns = detected.patterns;
-  }
-  if (mentionedPattern && ann.patterns.length) {
-    ann.patterns[0] = {
-      ...ann.patterns[0],
-      name: mentionedPattern,
-      label: ann.patterns[0].breakoutTarget
-        ? `${mentionedPattern} · ${C.target} ${formatPrice(ann.patterns[0].breakoutTarget, precision)}`
-        : mentionedPattern
-    };
+    const engineAnn = buildAnnotationsFromPatternEngine(ctx.patternEngine, {
+      candles: ctx.candles,
+      indexOffset: 0,
+      precision,
+      lang: chartLang,
+      currencyPrefix: ctx.instrument?.market === 'in' ? '₹' : ''
+    });
+    if (!ann.trendlines.length) ann.trendlines = engineAnn.trendlines;
+    if (!ann.patterns.length) ann.patterns = engineAnn.patterns;
   }
 
   return ann;
@@ -1045,10 +1041,6 @@ export class AICopilotController {
         analysisResult.reportText || analysisResult.analysisMarkdown || ''
       );
 
-      const syncedLocalAnnotations = autoDraw
-        ? syncAnnotationsWithReport(analysisResult.annotations, finalReport, ctx, this.chartLang)
-        : null;
-
       const statusAwareReport = applyDataStatusToReport(
         finalReport,
         effectiveMeta,
@@ -1060,7 +1052,15 @@ export class AICopilotController {
       analysisResult.dataMeta = effectiveMeta;
 
       const globalAnnotations = autoDraw
-        ? normalizeAnnotationsToGlobal(syncedLocalAnnotations, ctx)
+        ? buildAnnotationsFromPatternEngine(ctx.patternEngine, {
+            indexOffset: 0,
+            candles: this.chart.candles,
+            visibleStart: ctx.visibleStart,
+            visibleEnd: ctx.visibleEnd,
+            precision: ctx.precision,
+            lang: this.chartLang,
+            currencyPrefix: ctx.instrument?.market === 'in' ? '₹' : ''
+          })
         : null;
 
       let annotatedImageUrl = null;

@@ -660,26 +660,11 @@ button, input, textarea {
   background: var(--bg-surface);
 }
 
-#mainChartCanvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
 .lwc-chart-container {
   position: relative;
   width: 100%;
   height: 100%;
   z-index: 1;
-}
-
-#mainChartCanvas.lwc-annotation-overlay {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 3;
-  pointer-events: none;
 }
 
 /* Top-Left TradingView Chart HUD */

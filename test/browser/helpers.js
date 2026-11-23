@@ -89,17 +89,19 @@ function makeMockCandles({ count = 120, endSec = Math.floor(Date.parse('2026-03-
 
 async function withCdpPage(chromeBin, targetUrl, fn, { width = 1440, height = 900, deviceScaleFactor = 1 } = {}) {
   const debugPort = await getFreePort();
+  const chromeArgs = [
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
+    `--window-size=${width},${height}`,
+    `--remote-debugging-port=${debugPort}`,
+    ...(deviceScaleFactor !== 1 ? [`--force-device-scale-factor=${deviceScaleFactor}`] : []),
+    'about:blank'
+  ];
   const chrome = spawn(
     chromeBin,
-    [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      `--window-size=${width},${height}`,
-      `--remote-debugging-port=${debugPort}`,
-      'about:blank'
-    ],
+    chromeArgs,
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
 

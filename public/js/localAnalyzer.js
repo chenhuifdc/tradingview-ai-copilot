@@ -16,6 +16,7 @@ import {
 } from './indicators.js';
 import { getLangPack } from './i18n.js';
 import { runPatternRuleEngine } from './patternEngine.js';
+import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
 
 /**
  * Cluster nearby pivot prices into strong Support/Resistance zones
@@ -134,7 +135,7 @@ export function extractChartContext(
   const macdHist = indicators?.macd?.hist?.[lastGlobalIdx] ?? null;
   const prevHist = indicators?.macd?.hist?.[prevGlobalIdx] ?? null;
 
-  const patternEngine = runPatternRuleEngine(slice, {
+  const patternEngine = runPatternRuleEngine(candles, {
     tickSize: instrument?.market === 'in' ? 0.05 : 0.01,
     interval: interval || '1d',
     timeZone: instrument?.timezone || (instrument?.market === 'in' ? 'Asia/Kolkata' : 'Asia/Kolkata')
@@ -148,6 +149,7 @@ export function extractChartContext(
     visibleEnd: end,
     visibleCount: slice.length,
     candles: slice,
+    allCandles: candles,
     latest,
     change,
     changePct,
@@ -519,55 +521,31 @@ export function runLocalQuantitativeAnalysis(ctx, userPrompt = '', lang = 'zh-CN
     supList.push({ price: ctx.periodLow, touches: 1, firstIndex: Math.max(0, ctx.lowIdx - 6), lastIndex: N - 1 });
   }
 
+  // M3: ALL chart drawing annotations come exclusively from deterministic patternEngine candidates by score
+  const currencyPrefix = instrument?.market === 'in' ? '₹' : '';
+  const engineAnnotations = buildAnnotationsFromPatternEngine(ctx.patternEngine, {
+    candles: ctx.allCandles || ctx.candles,
+    visibleStart: ctx.visibleStart,
+    visibleEnd: ctx.visibleEnd,
+    indexOffset: 0,
+    precision,
+    lang,
+    currencyPrefix
+  });
+  const { horizontalLevels, trendlines, patterns, signals, tradePlan } = engineAnnotations;
+
+  const engineSupPrices = horizontalLevels
+    .filter((l) => l.type === 'support')
+    .map((l) => formatPrice(l.price, precision));
+  const engineResPrices = horizontalLevels
+    .filter((l) => l.type === 'resistance')
+    .map((l) => formatPrice(l.price, precision));
+
+  // Pre-M4 local text fallback still guarantees non-empty S&R strings even on flat/synthetic charts
   const topRes = resList.slice(0, 2);
   const topSup = supList.slice(0, 2);
-
-  const horizontalLevels = [];
-  topRes.forEach((r, idx) => {
-    const lk = idx === 0 ? 'strongRes' : 'secRes';
-    horizontalLevels.push({
-      id: `sr_res_${idx + 1}`,
-      type: 'resistance',
-      price: Number(r.price.toFixed(precision)),
-      startIndex: Math.max(0, Math.min(r.firstIndex, N - 18)),
-      endIndex: N - 1,
-      strength: idx === 0 || r.touches >= 2 ? 'strong' : 'medium',
-      labelKey: lk,
-      labelCount: r.touches,
-      label: idx === 0 ? C.strongRes(r.touches) : C.secRes
-    });
-  });
-  topSup.forEach((s, idx) => {
-    const lk = idx === 0 ? 'keySup' : 'defSup';
-    horizontalLevels.push({
-      id: `sr_sup_${idx + 1}`,
-      type: 'support',
-      price: Number(s.price.toFixed(precision)),
-      startIndex: Math.max(0, Math.min(s.firstIndex, N - 18)),
-      endIndex: N - 1,
-      strength: idx === 0 || s.touches >= 2 ? 'strong' : 'medium',
-      labelKey: lk,
-      labelCount: s.touches,
-      label: idx === 0 ? C.keySup(s.touches) : C.defSup
-    });
-  });
-
-  const { trendlines, patterns } = analyzeTrendlinesAndPatterns(ctx, lang);
-
-  const signals = ctx.lux.wicks.slice(-4).map((w, idx) => ({
-    id: `sig_${idx + 1}`,
-    index: w.index,
-    price: Number(w.price.toFixed(precision)),
-    kind: w.kind,
-    labelKey: w.kind === 'bear_wick' ? 'bearWick' : 'bullWick',
-    label: w.kind === 'bear_wick' ? C.bearWick : C.bullWick
-  }));
-
-  // Strictly no buy/sell tradePlan boxes by default (adhering to red line: no buy/sell directives)
-  const tradePlan = null;
-
-  const supPriceStrs = topSup.map((s) => formatPrice(s.price, precision));
-  const resPriceStrs = topRes.map((r) => formatPrice(r.price, precision));
+  const supPriceStrs = engineSupPrices.length ? engineSupPrices : topSup.map((s) => formatPrice(s.price, precision));
+  const resPriceStrs = engineResPrices.length ? engineResPrices : topRes.map((r) => formatPrice(r.price, precision));
   const s1Str = supPriceStrs[0];
   const r1Str = resPriceStrs[0];
 
@@ -634,6 +612,7 @@ export function runLocalQuantitativeAnalysis(ctx, userPrompt = '', lang = 'zh-CN
     reportText,
     analysisMarkdown: reportText,
     annotations: {
+      source: 'patternEngine',
       horizontalLevels,
       trendlines,
       patterns,
