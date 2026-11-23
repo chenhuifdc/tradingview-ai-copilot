@@ -262,10 +262,17 @@ function measureSegmentLineError(img, { x1, y1, x2, y2, targetRgb, dpr }) {
   };
 }
 
-async function runM3BrowserTest(chromeBin) {
-  const fixtureData = JSON.parse(fs.readFileSync(FIXTURES_PATH, 'utf8')).fixtures;
-  const saveDir = process.env.M3_SAVE_SCREENSHOTS_DIR || '';
-  const commitTag = process.env.M3_COMMIT_TAG || '';
+const HOLDOUT_PATH = path.join(__dirname, '..', 'fixtures', 'india-holdout-klines.json');
+
+async function runM3BrowserTest(chromeBin, options = {}) {
+  const devFixtures = JSON.parse(fs.readFileSync(FIXTURES_PATH, 'utf8')).fixtures;
+  const holdoutFixtures = fs.existsSync(HOLDOUT_PATH)
+    ? JSON.parse(fs.readFileSync(HOLDOUT_PATH, 'utf8')).fixtures
+    : {};
+  const fixtureData = options.fixturesMap || { ...devFixtures, ...holdoutFixtures };
+  const symbolsToTest = options.symbols || FIVE_NSE_SYMBOLS;
+  const saveDir = options.saveDir || process.env.M3_SAVE_SCREENSHOTS_DIR || '';
+  const commitTag = options.commitTag || process.env.M3_COMMIT_TAG || '';
   if (saveDir) fs.mkdirSync(saveDir, { recursive: true });
 
   const mockMarketService = {
@@ -361,10 +368,20 @@ async function runM3BrowserTest(chromeBin) {
         assert.equal(domAudit.hasClearBtn, true);
         assert.equal(domAudit.hasToggleAiBtn, true);
 
+        const rupeeProbe = await evaluate(`(async () => {
+          const mod = await import('/js/lwcAnnotationPrimitive.js');
+          mod.clearRupeeGlyphCache();
+          const supported = mod.detectRupeeGlyphSupport({ forceCheck: true });
+          const prefix = mod.resolveInrCurrencyPrefix();
+          return { supported, prefix };
+        })()`);
+        assert.equal(typeof rupeeProbe.supported, 'boolean');
+        assert.equal(rupeeProbe.prefix, rupeeProbe.supported ? '₹' : 'Rs.');
+
         const summaryBySymbol = {};
 
-        // 2) Run full M3 alignment & visual checks across ALL 5 real NSE fixtures
-        for (const sym of FIVE_NSE_SYMBOLS) {
+        // 2) Run full M3 alignment & visual checks across target NSE fixtures
+        for (const sym of symbolsToTest) {
           const snapInfo = await evaluate(`(async () => {
             const app = window.__chartCopilot;
             // Clear any saved API key so built-in patternEngine path runs deterministically offline
@@ -725,6 +742,7 @@ async function runM3BrowserTest(chromeBin) {
 
         return {
           domAudit,
+          rupeeProbe,
           symbols: summaryBySymbol,
           zoomAlignedErrCss: Number(zErr.medianErrCss.toFixed(3)),
           clearedVerified: true

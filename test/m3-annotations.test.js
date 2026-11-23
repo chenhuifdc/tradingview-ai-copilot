@@ -419,3 +419,138 @@ test('M3.4 Native AIAnnotationSeriesPrimitive uses logical coordinates for futur
   assert.equal(drawOps, 0, 'Cleared primitive must draw 0 operations');
   assert.equal(primitive.getLastRenderedLayout(), null);
 });
+
+test('M3.5 (M3.1 Item 1) Holdout validation: 3 unseen NSE sectors (MARUTI, LT, BHARTIARTL) pass engine, anchor snapping, and aesthetic caps without tuning', async () => {
+  const { runPatternRuleEngine, PATTERN_ENGINE_CONFIG } = await import('../public/js/patternEngine.js');
+  const { buildAnnotationsFromPatternEngine } = await import('../public/js/lwcAnnotationPrimitive.js');
+
+  const holdoutPath = path.join(__dirname, 'fixtures', 'india-holdout-klines.json');
+  const holdout = JSON.parse(fs.readFileSync(holdoutPath, 'utf8')).fixtures;
+  const holdoutSymbols = ['MARUTI.NS', 'LT.NS', 'BHARTIARTL.NS'];
+
+  for (const sym of holdoutSymbols) {
+    const entry = holdout[sym];
+    assert.ok(entry && entry.candles.length >= 400, `${sym} holdout fixture must exist with >= 400 bars`);
+    const out = runPatternRuleEngine(entry.candles, {
+      interval: '1d',
+      timeZone: 'Asia/Kolkata',
+      useCache: false
+    });
+    const ann = buildAnnotationsFromPatternEngine(out, { candles: out.candles, precision: 2 });
+
+    assert.ok(out.supportResistance.supports.length >= 1, `${sym} must detect >= 1 support`);
+    assert.ok(out.supportResistance.resistances.length >= 1, `${sym} must detect >= 1 resistance`);
+    assert.ok(ann.horizontalLevels.filter((l) => l.type === 'support').length <= 2);
+    assert.ok(ann.horizontalLevels.filter((l) => l.type === 'resistance').length <= 2);
+    assert.ok(ann.trendlines.length <= 1);
+    assert.ok(ann.patterns.length <= 1);
+
+    // Non-saturation & minScore compliance
+    for (const c of [
+      ...out.supportResistance.supports,
+      ...out.supportResistance.resistances,
+      ...out.trendlines,
+      ...out.boxRanges,
+      ...out.divergences,
+      ...out.patterns
+    ]) {
+      assert.ok(c.score > 0 && c.score < 1, `${sym} score ${c.score} must be in (0, 1)`);
+    }
+    for (const c of out.supportResistance.supports) assert.ok(c.score >= PATTERN_ENGINE_CONFIG.minScores.supportResistance);
+    for (const c of out.supportResistance.resistances) assert.ok(c.score >= PATTERN_ENGINE_CONFIG.minScores.supportResistance);
+
+    // Exact anchor snapping on holdout stocks
+    for (const lvl of ann.horizontalLevels) {
+      const bar = out.candles[lvl.anchorIndex];
+      assert.ok(lvl.price === bar.high || lvl.price === bar.low, `${sym} level ${lvl.id} must snap to high/low`);
+    }
+  }
+});
+
+test('M3.6 (M3.1 Item 2) Rupee glyph pixel detector uses ₹ when distinct and automatically falls back to Rs. when tofu or blank', async () => {
+  const { runPatternRuleEngine } = await import('../public/js/patternEngine.js');
+  const {
+    detectRupeeGlyphSupport,
+    resolveInrCurrencyPrefix,
+    buildAnnotationsFromPatternEngine,
+    clearRupeeGlyphCache
+  } = await import('../public/js/lwcAnnotationPrimitive.js');
+
+  // Helper that builds an offscreen 48x36 RGBA pixel-buffer canvas mock for deterministic glyph simulation
+  const makePixelCanvasFactory = (glyphBitmapFn) => () => {
+    const buf = new Uint8ClampedArray(48 * 36 * 4);
+    let fill = '#ffffff';
+    return {
+      width: 48,
+      height: 36,
+      getContext: () => ({
+        set fillStyle(v) { fill = v; },
+        set font(_) {},
+        set textBaseline(_) {},
+        fillRect: (x, y, w, h) => {
+          const val = fill === '#ffffff' ? 255 : 0;
+          for (let py = y; py < y + h; py++) {
+            for (let px = x; px < x + w; px++) {
+              const idx = (py * 48 + px) * 4;
+              buf[idx] = val; buf[idx + 1] = val; buf[idx + 2] = val; buf[idx + 3] = 255;
+            }
+          }
+        },
+        fillText: (ch) => {
+          glyphBitmapFn(ch, buf, 48, 36);
+        },
+        getImageData: () => ({ data: buf })
+      })
+    };
+  };
+
+  const paintRect = (buf, x0, y0, x1, y1) => {
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const idx = (y * 48 + x) * 4;
+        buf[idx] = 0; buf[idx + 1] = 0; buf[idx + 2] = 0; buf[idx + 3] = 255;
+      }
+    }
+  };
+
+  clearRupeeGlyphCache();
+
+  // Case 1: ₹ renders distinct strokes while \uFFFD / \u25A1 render a tofu box -> supported = true ('₹')
+  const supportedFactory = makePixelCanvasFactory((ch, buf) => {
+    if (ch === '\u20B9') {
+      paintRect(buf, 10, 8, 22, 10);
+      paintRect(buf, 10, 14, 22, 16);
+      paintRect(buf, 14, 10, 18, 28);
+    } else {
+      paintRect(buf, 12, 10, 24, 26); // tofu box
+    }
+  });
+  assert.equal(detectRupeeGlyphSupport({ createCanvas: supportedFactory }), true);
+  assert.equal(resolveInrCurrencyPrefix({ createCanvas: supportedFactory }), '₹');
+
+  // Case 2: Missing glyph -> ₹ renders identical tofu box as \u25A1 -> supported = false ('Rs.')
+  const tofuFallbackFactory = makePixelCanvasFactory((_ch, buf) => {
+    paintRect(buf, 12, 10, 24, 26);
+  });
+  assert.equal(detectRupeeGlyphSupport({ createCanvas: tofuFallbackFactory }), false);
+  assert.equal(resolveInrCurrencyPrefix({ createCanvas: tofuFallbackFactory }), 'Rs.');
+
+  // Case 3: Blank glyph -> ₹ renders 0 ink pixels -> supported = false ('Rs.')
+  const blankFactory = makePixelCanvasFactory((ch, buf) => {
+    if (ch !== '\u20B9') paintRect(buf, 12, 10, 24, 26);
+  });
+  assert.equal(detectRupeeGlyphSupport({ createCanvas: blankFactory }), false);
+
+  // End-to-end check with real patternEngine output -> labels switch between ₹ and Rs.
+  const holdoutPath = path.join(__dirname, 'fixtures', 'india-holdout-klines.json');
+  const maruti = JSON.parse(fs.readFileSync(holdoutPath, 'utf8')).fixtures['MARUTI.NS'].candles;
+  const out = runPatternRuleEngine(maruti, { useCache: false });
+
+  const annSupported = buildAnnotationsFromPatternEngine(out, { candles: out.candles, createCanvas: supportedFactory });
+  assert.ok(annSupported.horizontalLevels[0].label.includes('₹'), `Expected ₹ in label, got ${annSupported.horizontalLevels[0].label}`);
+
+  const annFallback = buildAnnotationsFromPatternEngine(out, { candles: out.candles, createCanvas: tofuFallbackFactory });
+  assert.ok(annFallback.horizontalLevels[0].label.includes('Rs.'), `Expected Rs. fallback in label, got ${annFallback.horizontalLevels[0].label}`);
+  assert.equal(annFallback.horizontalLevels[0].label.includes('₹'), false);
+});
+

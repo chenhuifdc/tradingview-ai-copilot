@@ -176,6 +176,102 @@ export function resolveNonOverlappingLabels(items, { minGap = 20, minY = 12, max
   return sorted;
 }
 
+const RUPEE_GLYPH_FONT = '600 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+const rupeeSupportCache = new Map();
+
+export function clearRupeeGlyphCache() {
+  rupeeSupportCache.clear();
+}
+
+/**
+ * Pixel-based detection of whether '₹' (U+20B9) renders as a distinct non-tofu glyph
+ * in the active Canvas 2D font stack.
+ * Compares rendered pixels of '₹' against '\uFFFD' (replacement), '\uFFFF' (undef), and '\u25A1' (tofu box).
+ */
+export function detectRupeeGlyphSupport({
+  fontFamily = RUPEE_GLYPH_FONT,
+  createCanvas = null,
+  forceCheck = false
+} = {}) {
+  if (!forceCheck && !createCanvas && rupeeSupportCache.has(fontFamily)) {
+    return rupeeSupportCache.get(fontFamily);
+  }
+
+  const canvasFactory = createCanvas || (
+    typeof document !== 'undefined' && typeof document.createElement === 'function'
+      ? () => document.createElement('canvas')
+      : null
+  );
+  if (!canvasFactory) {
+    return true;
+  }
+
+  let supported = true;
+  try {
+    const w = 48;
+    const h = 36;
+    const renderGlyph = (ch) => {
+      const c = canvasFactory();
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext?.('2d');
+      if (!ctx || typeof ctx.getImageData !== 'function') return null;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#000000';
+      ctx.font = fontFamily;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ch, 8, Math.floor(h / 2));
+      const data = ctx.getImageData(0, 0, w, h).data;
+      let ink = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i] < 200 || data[i + 1] < 200 || data[i + 2] < 200) ink++;
+      }
+      return { data, ink };
+    };
+
+    const diffPixels = (a, b) => {
+      let diff = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        if (
+          Math.abs(a[i] - b[i]) > 24 ||
+          Math.abs(a[i + 1] - b[i + 1]) > 24 ||
+          Math.abs(a[i + 2] - b[i + 2]) > 24
+        ) {
+          diff++;
+        }
+      }
+      return diff;
+    };
+
+    const rupee = renderGlyph('\u20B9');
+    if (!rupee) {
+      supported = true;
+    } else if (rupee.ink < 12) {
+      supported = false;
+    } else {
+      const rep = renderGlyph('\uFFFD');
+      const undef = renderGlyph('\uFFFF');
+      const tofu = renderGlyph('\u25A1');
+      if (rep && diffPixels(rupee.data, rep.data) < 10) supported = false;
+      else if (undef && diffPixels(rupee.data, undef.data) < 10) supported = false;
+      else if (tofu && diffPixels(rupee.data, tofu.data) < 10) supported = false;
+      else supported = true;
+    }
+  } catch {
+    supported = false;
+  }
+
+  if (!createCanvas) {
+    rupeeSupportCache.set(fontFamily, supported);
+  }
+  return supported;
+}
+
+export function resolveInrCurrencyPrefix(options = {}) {
+  return detectRupeeGlyphSupport(options) ? '₹' : 'Rs.';
+}
+
 /**
  * Build M3 chart annotations strictly from deterministic patternEngine candidates,
  * ordered by score descending and bounded by ANNOTATION_STYLE_CONFIG.limits.
@@ -199,7 +295,10 @@ export function buildAnnotationsFromPatternEngine(engineResult, options = {}) {
   const indexOffset = Number.isFinite(options.indexOffset) ? Math.round(options.indexOffset) : 0;
   const globalCandles = Array.isArray(options.candles) ? options.candles : (engineResult.candles || []);
   const precision = Number.isFinite(options.precision) ? options.precision : 2;
-  const currencyPrefix = options.currencyPrefix ?? '₹';
+  const requestedPrefix = options.currencyPrefix ?? '₹';
+  const currencyPrefix = requestedPrefix === '₹'
+    ? resolveInrCurrencyPrefix({ fontFamily: options.labelFontFamily, createCanvas: options.createCanvas })
+    : requestedPrefix;
   const isEn = String(options.lang || 'zh-CN').toLowerCase().startsWith('en');
   const visibleStart = Number.isFinite(options.visibleStart) ? options.visibleStart : null;
   const visibleEnd = Number.isFinite(options.visibleEnd) ? options.visibleEnd : null;
