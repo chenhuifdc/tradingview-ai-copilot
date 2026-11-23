@@ -19,38 +19,6 @@ import { runPatternRuleEngine } from './patternEngine.js';
 import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
 
 /**
- * Cluster nearby pivot prices into strong Support/Resistance zones
- */
-function clusterLevels(pivots, tolerancePct = 0.022) {
-  const clusters = [];
-  for (const p of pivots) {
-    let matched = null;
-    for (const c of clusters) {
-      if (Math.abs(p.price - c.price) / Math.max(c.price, 0.0001) <= tolerancePct) {
-        matched = c;
-        break;
-      }
-    }
-    if (matched) {
-      matched.touches += 1;
-      matched.price = (matched.price * (matched.touches - 1) + p.price) / matched.touches;
-      matched.firstIndex = Math.min(matched.firstIndex, p.index);
-      matched.lastIndex = Math.max(matched.lastIndex, p.index);
-      matched.points.push(p);
-    } else {
-      clusters.push({
-        price: p.price,
-        touches: 1,
-        firstIndex: p.index,
-        lastIndex: p.index,
-        points: [p]
-      });
-    }
-  }
-  return clusters.sort((a, b) => b.touches - a.touches || b.lastIndex - a.lastIndex);
-}
-
-/**
  * Extract rich quantitative chart summary for both LLM prompt grounding and local analysis
  */
 export function extractChartContext(
@@ -91,15 +59,6 @@ export function extractChartContext(
 
   const pivots = detectPivots(slice, 5, 5);
   const lux = calcLuxAlgoSR(slice, 7, 7);
-
-  const resistanceClusters = clusterLevels(pivots.highs, 0.025)
-    .filter((c) => c.price >= latest.close * 0.995)
-    .sort((a, b) => a.price - b.price)
-    .slice(0, 4);
-  const supportClusters = clusterLevels(pivots.lows, 0.025)
-    .filter((c) => c.price <= latest.close * 1.005)
-    .sort((a, b) => b.price - a.price)
-    .slice(0, 4);
 
   // Pull real-time indicator snapshots at the latest visible bar
   const lastGlobalIdx = end;
@@ -159,8 +118,6 @@ export function extractChartContext(
     lowIdx,
     pivots,
     lux,
-    resistanceClusters,
-    supportClusters,
     patternEngine,
     fundamentals,
     activeEmaPeriods,
@@ -189,170 +146,6 @@ export function extractChartContext(
       prevHist
     }
   };
-}
-
-/**
- * Fit trendlines and recognize technical patterns from visible swing pivots
- */
-export function analyzeTrendlinesAndPatterns(ctx, lang = 'zh-CN') {
-  const { candles, pivots, latest, precision } = ctx;
-  const C = getLangPack(lang).chart;
-  const N = candles.length;
-  const trendlines = [];
-  const patterns = [];
-
-  const recentHighs = pivots.highs.filter((p) => p.index >= Math.floor(N * 0.18));
-  const recentLows = pivots.lows.filter((p) => p.index >= Math.floor(N * 0.18));
-
-  let upperLine = null;
-  if (recentHighs.length >= 2) {
-    const h2 = recentHighs[recentHighs.length - 1];
-    let h1 = recentHighs[recentHighs.length - 2];
-    for (let i = recentHighs.length - 2; i >= 0; i--) {
-      if (h2.index - recentHighs[i].index >= 8) {
-        h1 = recentHighs[i];
-        break;
-      }
-    }
-    if (h2.index > h1.index) {
-      const slope = (h2.price - h1.price) / (h2.index - h1.index);
-      upperLine = {
-        startIndex: h1.index,
-        startPrice: Number(h1.price.toFixed(precision)),
-        endIndex: h2.index,
-        endPrice: Number(h2.price.toFixed(precision)),
-        slope
-      };
-      const lk = slope < 0 ? 'downtrend' : 'upperChannel';
-      trendlines.push({
-        id: 'tl_upper',
-        type: slope < 0 ? 'downtrend' : 'channel',
-        startIndex: h1.index,
-        startPrice: upperLine.startPrice,
-        endIndex: h2.index,
-        endPrice: upperLine.endPrice,
-        extendRight: true,
-        labelKey: lk,
-        label: C[lk]
-      });
-    }
-  }
-
-  let lowerLine = null;
-  if (recentLows.length >= 2) {
-    const l2 = recentLows[recentLows.length - 1];
-    let l1 = recentLows[recentLows.length - 2];
-    for (let i = recentLows.length - 2; i >= 0; i--) {
-      if (l2.index - recentLows[i].index >= 8) {
-        l1 = recentLows[i];
-        break;
-      }
-    }
-    if (l2.index > l1.index) {
-      const slope = (l2.price - l1.price) / (l2.index - l1.index);
-      lowerLine = {
-        startIndex: l1.index,
-        startPrice: Number(l1.price.toFixed(precision)),
-        endIndex: l2.index,
-        endPrice: Number(l2.price.toFixed(precision)),
-        slope
-      };
-      const lk = slope > 0 ? 'uptrend' : 'lowerChannel';
-      trendlines.push({
-        id: 'tl_lower',
-        type: slope > 0 ? 'uptrend' : 'channel',
-        startIndex: l1.index,
-        startPrice: lowerLine.startPrice,
-        endIndex: l2.index,
-        endPrice: lowerLine.endPrice,
-        extendRight: true,
-        labelKey: lk,
-        label: C[lk]
-      });
-    }
-  }
-
-  if (upperLine && lowerLine) {
-    const startIdx = Math.min(upperLine.startIndex, lowerLine.startIndex);
-    const endIdx = N - 1;
-    const uStart = upperLine.startPrice + upperLine.slope * (startIdx - upperLine.startIndex);
-    const uEnd = upperLine.startPrice + upperLine.slope * (endIdx - upperLine.startIndex);
-    const lStart = lowerLine.startPrice + lowerLine.slope * (startIdx - lowerLine.startIndex);
-    const lEnd = lowerLine.startPrice + lowerLine.slope * (endIdx - lowerLine.startIndex);
-
-    const spreadStart = Math.max(0.0001, uStart - lStart);
-    const spreadEnd = uEnd - lEnd;
-    const isConverging = spreadEnd > 0 && spreadEnd < spreadStart * 0.85;
-    const isParallel = spreadEnd > 0 && Math.abs(spreadEnd / spreadStart - 1) <= 0.35;
-
-    let patKey = 'patRange';
-    let patternBias = 'neutral';
-    let target = latest.close * 1.12;
-
-    if (upperLine.slope < 0 && lowerLine.slope > 0 && isConverging) {
-      patKey = 'patSymTri';
-      patternBias = latest.close > (uEnd + lEnd) / 2 ? 'bullish' : 'neutral';
-      target = uEnd + spreadStart * 0.65;
-    } else if (Math.abs(upperLine.slope) < Math.abs(lowerLine.slope) * 0.35 && lowerLine.slope > 0) {
-      patKey = 'patAscTri';
-      patternBias = 'bullish';
-      target = uEnd + spreadStart * 0.72;
-    } else if (Math.abs(lowerLine.slope) < Math.abs(upperLine.slope) * 0.35 && upperLine.slope < 0) {
-      patKey = 'patDescTri';
-      patternBias = 'bearish';
-      target = Math.max(latest.close * 0.75, lEnd - spreadStart * 0.65);
-    } else if (upperLine.slope > 0 && lowerLine.slope > 0 && isParallel) {
-      patKey = 'patAscCh';
-      patternBias = 'bullish';
-      target = uEnd + spreadStart * 0.35;
-    } else if (upperLine.slope < 0 && lowerLine.slope < 0 && isParallel) {
-      patKey = 'patDescCh';
-      patternBias = 'bearish';
-      target = Math.max(latest.close * 0.75, lEnd - spreadStart * 0.35);
-    } else if (recentLows.length >= 2) {
-      const a = recentLows[recentLows.length - 2];
-      const b = recentLows[recentLows.length - 1];
-      if (Math.abs(a.price - b.price) / a.price < 0.045) {
-        patKey = 'patDblBot';
-        patternBias = 'bullish';
-        target = Math.max(upperLine.startPrice, upperLine.endPrice) * 1.08;
-      }
-    }
-
-    const polygonPoints = [
-      { index: startIdx, price: Number(uStart.toFixed(precision)) },
-      { index: endIdx, price: Number(Math.max(uEnd, lEnd + latest.close * 0.02).toFixed(precision)) },
-      { index: endIdx, price: Number(Math.min(lEnd, uEnd - latest.close * 0.02).toFixed(precision)) },
-      { index: startIdx, price: Number(lStart.toFixed(precision)) }
-    ];
-
-    const targetStr = formatPrice(target, precision);
-    const patternName = C[patKey];
-    patterns.push({
-      id: 'pat_main',
-      name: patternName,
-      labelKey: patKey,
-      targetText: targetStr,
-      bias: patternBias,
-      points: polygonPoints,
-      upperLine: {
-        startIndex: startIdx,
-        startPrice: polygonPoints[0].price,
-        endIndex: endIdx,
-        endPrice: polygonPoints[1].price
-      },
-      lowerLine: {
-        startIndex: startIdx,
-        startPrice: polygonPoints[3].price,
-        endIndex: endIdx,
-        endPrice: polygonPoints[2].price
-      },
-      breakoutTarget: Number(target.toFixed(precision)),
-      label: `${patternName} · ${C.target} ${targetStr}`
-    });
-  }
-
-  return { trendlines, patterns };
 }
 
 const SECTOR_ZH = {
@@ -495,7 +288,7 @@ export function runLocalQuantitativeAnalysis(ctx, userPrompt = '', lang = 'zh-CN
   const dailyRes = (fundamentals?.dailySR?.resistances || []).filter((p) => Number.isFinite(p) && p >= latest.close * 0.995);
   const dailySup = (fundamentals?.dailySR?.supports || []).filter((p) => Number.isFinite(p) && p <= latest.close * 1.005);
 
-  const resList = [...ctx.resistanceClusters];
+  const resList = [...(ctx.patternEngine?.resistances || [])];
   if (isIntraday && dailyRes.length) {
     for (const dp of dailyRes) {
       if (!resList.some((r) => Math.abs(r.price - dp) / Math.max(dp, 1e-6) < 0.015)) {
@@ -508,7 +301,7 @@ export function runLocalQuantitativeAnalysis(ctx, userPrompt = '', lang = 'zh-CN
     resList.push({ price: ctx.periodHigh, touches: 1, firstIndex: Math.max(0, ctx.highIdx - 6), lastIndex: N - 1 });
   }
 
-  const supList = [...ctx.supportClusters];
+  const supList = [...(ctx.patternEngine?.supports || [])];
   if (isIntraday && dailySup.length) {
     for (const dp of dailySup) {
       if (!supList.some((s) => Math.abs(s.price - dp) / Math.max(dp, 1e-6) < 0.015)) {

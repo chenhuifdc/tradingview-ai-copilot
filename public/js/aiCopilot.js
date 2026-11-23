@@ -8,10 +8,7 @@
  */
 
 import { formatPrice, formatTimeLabel } from './indicators.js';
-import {
-  extractChartContext,
-  runLocalQuantitativeAnalysis
-} from './localAnalyzer.js';
+import { extractChartContext } from './localAnalyzer.js';
 import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
 import { renderAnnotatedScreenshot, downloadDataUrl, EXPORT_CONFIG } from './screenshotAnnotator.js';
 import { getLangPack, getLangMeta } from './i18n.js';
