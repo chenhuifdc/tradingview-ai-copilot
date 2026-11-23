@@ -16,6 +16,7 @@ import { buildAnnotationsFromPatternEngine } from './lwcAnnotationPrimitive.js';
 import { renderAnnotatedScreenshot, downloadDataUrl } from './screenshotAnnotator.js';
 import { getLangPack, getLangMeta } from './i18n.js';
 import { escapeHtml, sanitizeImageDataUrl, renderSafeMarkdown } from './sanitize.js';
+import { runM4Pipeline } from './m4Pipeline.js';
 
 const STORAGE_KEY = 'chartcopilot_ai_settings_v1';
 
@@ -983,66 +984,86 @@ export class AICopilotController {
       let modelLabel = U.demoEngine;
       let fallbackNotice = '';
 
-      if (this.hasApiKey()) {
+      const allowLocal = Boolean(PROVIDER_PRESETS[this.settings.provider]?.allowLocal);
+      const hasKey = this.hasApiKey();
+      if (hasKey) {
         modelLabel = this.settings.model;
-        try {
-          const allowLocal = Boolean(PROVIDER_PRESETS[this.settings.provider]?.allowLocal);
-          const messages = buildLLMMessages(
-            ctx,
-            userPrompt.trim(),
-            snapshot.cleanDataUrl,
-            this.settings.enableVision,
-            this.chartLang,
-            effectiveMeta
-          );
-          const resp = await fetch('/api/ai/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              apiKey: this.settings.apiKey,
-              baseUrl: this.settings.baseUrl,
-              model: this.settings.model,
-              allowLocal,
-              messages,
-              temperature: 0.2,
-              maxTokens: 3200
-            })
-          });
-          const data = await resp.json();
-          if (!resp.ok || data.error) {
-            throw new Error(data.error || `HTTP ${resp.status}`);
-          }
-
-          const { parsed } = parseLLMResponse(data.content);
-          const cleanReport = sanitizeStrictReportText(
-            parsed.reportText || parsed.analysisMarkdown || data.content
-          );
-          analysisResult = {
-            bias: parsed.bias || 'neutral',
-            confidence: Number(parsed.confidence) || 75,
-            summary: parsed.summary || `${ctx.instrument.name || ctx.instrument.displaySymbol}`,
-            reportText: cleanReport,
-            analysisMarkdown: cleanReport,
-            annotations: parsed.annotations,
-            latencyMs: data.latencyMs,
-            engine: 'byok_llm'
-          };
-        } catch (apiErr) {
-          fallbackNotice = `API Error (${apiErr.message}) — fallback to built-in quant engine.`;
-          analysisResult = runLocalQuantitativeAnalysis(ctx, userPrompt, this.chartLang);
-          modelLabel = U.demoEngine;
-        }
-      } else {
-        await new Promise((r) => setTimeout(r, 380));
-        analysisResult = runLocalQuantitativeAnalysis(ctx, userPrompt, this.chartLang);
       }
 
-      const finalReport = sanitizeStrictReportText(
-        analysisResult.reportText || analysisResult.analysisMarkdown || ''
-      );
+      const callModelFn = hasKey
+        ? async (messages) => {
+            const payloadMessages = messages.map((m, idx) => {
+              if (idx === messages.length - 1 && m.role === 'user' && this.settings.enableVision && snapshot.cleanDataUrl) {
+                return {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: m.content },
+                    { type: 'image_url', image_url: { url: snapshot.cleanDataUrl } }
+                  ]
+                };
+              }
+              return m;
+            });
+            const resp = await fetch('/api/ai/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                apiKey: this.settings.apiKey,
+                baseUrl: this.settings.baseUrl,
+                model: this.settings.model,
+                allowLocal,
+                messages: payloadMessages,
+                temperature: 0.2,
+                maxTokens: 1600
+              })
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.error) {
+              throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            return { content: data.content, latencyMs: data.latencyMs };
+          }
+        : null;
+
+      if (!hasKey) {
+        await new Promise((r) => setTimeout(r, 120));
+      }
+
+      const m4Out = await runM4Pipeline({
+        ctx,
+        userPrompt: userPrompt.trim(),
+        dataMeta: effectiveMeta,
+        callModelFn,
+        chartLang: this.chartLang
+      });
+
+      if (hasKey && m4Out.usedFallback) {
+        fallbackNotice = `模型输出未通过 M4 严格校验，已自动回退本地模板（原因：${m4Out.fallbackReason}）`;
+        modelLabel = U.demoEngine;
+      }
+
+      analysisResult = {
+        bias: m4Out.bias,
+        confidence: m4Out.confidence,
+        summary: m4Out.summary,
+        reportText: m4Out.reportText,
+        analysisMarkdown: m4Out.reportText,
+        annotations: m4Out.annotations,
+        latencyMs: m4Out.latencyMs,
+        engine: hasKey && !m4Out.usedFallback ? 'byok_llm' : 'm4_local_template',
+        fundamentalsSufficient: m4Out.fundamentalsSufficient,
+        fundamentalsBadge: m4Out.fundamentalsBadge,
+        usedFallback: m4Out.usedFallback,
+        fallbackReason: m4Out.fallbackReason,
+        droppedIds: m4Out.droppedIds,
+        selectedSupport: m4Out.selectedSupport,
+        selectedResistance: m4Out.selectedResistance,
+        inputDigest: m4Out.inputDigest,
+        cacheHit: m4Out.cacheHit
+      };
 
       const statusAwareReport = applyDataStatusToReport(
-        finalReport,
+        analysisResult.reportText,
         effectiveMeta,
         this.chart.interval,
         ctx.latest?.time
@@ -1052,7 +1073,7 @@ export class AICopilotController {
       analysisResult.dataMeta = effectiveMeta;
 
       const globalAnnotations = autoDraw
-        ? buildAnnotationsFromPatternEngine(ctx.patternEngine, {
+        ? (m4Out.annotations || buildAnnotationsFromPatternEngine(ctx.patternEngine, {
             indexOffset: 0,
             candles: this.chart.candles,
             visibleStart: ctx.visibleStart,
@@ -1060,7 +1081,7 @@ export class AICopilotController {
             precision: ctx.precision,
             lang: this.chartLang,
             currencyPrefix: ctx.instrument?.market === 'in' ? '₹' : ''
-          })
+          }))
         : null;
 
       let annotatedImageUrl = null;
@@ -1205,6 +1226,12 @@ export class AICopilotController {
     modelTag.textContent = `${String(modelLabel ?? '')}${latencySuffix}`;
 
     badges.append(biasBadge, modelTag);
+    if (analysisResult.fundamentalsBadge) {
+      const fundBadge = document.createElement('span');
+      fundBadge.className = 'model-tag fundamentals-badge';
+      fundBadge.textContent = String(analysisResult.fundamentalsBadge);
+      badges.appendChild(fundBadge);
+    }
 
     const summaryEl = document.createElement('div');
     summaryEl.className = 'ai-card-summary';

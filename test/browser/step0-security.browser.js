@@ -3,8 +3,8 @@ const { startMockAppServer, makeMockCandles, withCdpPage } = require('./helpers'
 const aiProxy = require('../../server/aiProxy');
 
 async function runStep0BrowserTest(chromeBin) {
-  const scriptPayload = '<script>window.__xss=1</script>';
-  const imgPayload = '<img src=x onerror="window.__xss=2">';
+  const scriptPayload = '<script>window.__xss=5</script>';
+  const imgPayload = '<img src=x onerror="window.__xss=10">';
   const mockCandles = makeMockCandles({ count: 120 });
   const nowSec = mockCandles[mockCandles.length - 1].time;
 
@@ -73,24 +73,28 @@ async function runStep0BrowserTest(chromeBin) {
 
   const mockAiProxy = {
     ...aiProxy,
-    callChatCompletion: async () => ({
-      model: 'mock-xss-model',
-      latencyMs: 95,
-      content: JSON.stringify({
-        bias: 'neutral',
-        confidence: 78,
-        summary: `Summary ${scriptPayload}`,
-        reportText: `测试公司是行业代表企业${scriptPayload}。但受${imgPayload}影响，基本面平稳。\n\n技术面来看，震荡整理${imgPayload}。\n\n支撑位： 1320.00\n阻力位： 1410.00\n\n操作建议：保持观察${scriptPayload}。`,
-        annotations: {
-          horizontalLevels: [
-            { type: 'support', price: 1320.0, startIndex: 20, endIndex: 119, label: '支撑位' },
-            { type: 'resistance', price: 1410.0, startIndex: 20, endIndex: 119, label: '阻力位' }
-          ],
-          trendlines: [],
-          patterns: []
-        }
-      })
-    })
+    callChatCompletion: async ({ messages }) => {
+      const userMsg = String(messages?.[messages.length - 1]?.content || '');
+      const closeMatch = userMsg.match(/最新收盘价：([0-9,.]+)/);
+      const closePrice = closeMatch ? parseFloat(closeMatch[1].replace(/,/g, '')) : Infinity;
+      const candMatches = [...userMsg.matchAll(/- id=([^\s|]+)\s*\|\s*类=(support|resistance)[^\n]*\|\s*price=([0-9,.]+)/g)];
+      const supCand = candMatches.find((m) => m[2] === 'support' && parseFloat(m[3].replace(/,/g, '')) <= closePrice) || candMatches.find((m) => m[2] === 'support');
+      const resCand = candMatches.find((m) => m[2] === 'resistance' && parseFloat(m[3].replace(/,/g, '')) >= closePrice) || candMatches.find((m) => m[2] === 'resistance');
+      const supId = supCand ? supCand[1] : '';
+      const resId = resCand ? resCand[1] : '';
+      return {
+        model: 'mock-xss-model',
+        latencyMs: 95,
+        content: JSON.stringify({
+          fundamentals_sentence: `测试公司是行业代表企业${scriptPayload}。`,
+          technical_sentence: `技术面来看，围绕{SUPPORT}至{RESISTANCE}区间震荡${imgPayload}。`,
+          support_id: supId,
+          resistance_id: resId,
+          advice: `操作建议：保持观察{SUPPORT}与{RESISTANCE}${scriptPayload}。`,
+          annotation_ids: [supId, resId].filter(Boolean)
+        })
+      };
+    }
   };
 
   const srv = await startMockAppServer({ marketService: mockMarketService, aiProxy: mockAiProxy });
@@ -133,8 +137,8 @@ async function runStep0BrowserTest(chromeBin) {
           searchHasRawScriptTag: /<script\\b/i.test(searchHtml),
           reportChildCount: reportEl ? reportEl.children.length : -1,
           reportHasLiteralPayloads:
-            reportText.includes('<script>window.__xss=1</script>') &&
-            reportText.includes('<img src=x onerror="window.__xss=2">'),
+            reportText.includes('<script>window.__xss=5</script>') &&
+            reportText.includes('<img src=x onerror="window.__xss=10">'),
           reportHasRawTags: /<(script|img)\\b/i.test(reportHtml),
           userBubbleHasRawScript: /<script\\b/i.test(userBubbleHtml),
           reportWhiteSpace: reportStyle?.whiteSpace || '',
