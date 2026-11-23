@@ -362,3 +362,43 @@ test('render.yaml and Dockerfile explicitly set HOST=0.0.0.0 for container and R
   assert.equal(cfgFromDocker.allowLocalLlm, false);
 });
 
+test('validateBaseUrl rejects raw numeric-encoded hosts (decimal/hex/octal/shorthand) before URL normalization even when allowLocal=true, and rejects mixed public+private DNS records', async () => {
+  const numericHosts = ['2130706433', '0x7f000001', '0177.0.0.1', '127.1', '0x7f.0.0.1', '127.0.1'];
+
+  for (const host of numericHosts) {
+    await assert.rejects(
+      () => validateBaseUrl(`https://${host}/v1`, { allowLocal: false, serverAllowLocal: false }),
+      (err) => /数值编码/.test(err.message),
+      `Cloud mode must reject numeric host ${host} as suspicious numeric encoding`
+    );
+
+    await assert.rejects(
+      () => validateBaseUrl(`http://${host}:11434/v1`, { allowLocal: true, serverAllowLocal: true }),
+      (err) => /数值编码/.test(err.message),
+      `Local mode (allowLocal=true) must ALSO reject numeric host ${host}`
+    );
+  }
+
+  // Standard dotted-quad loopback remains permitted when allowLocal && serverAllowLocal
+  const okLocal = await validateBaseUrl('http://127.0.0.1:11434/v1', {
+    allowLocal: true,
+    serverAllowLocal: true
+  });
+  assert.equal(okLocal.allowLocal, true);
+
+  // Multi-record DNS containing one public IP and one private IP must be rejected
+  await assert.rejects(
+    () =>
+      validateBaseUrl('https://dual-dns.example.com/v1', {
+        allowLocal: false,
+        serverAllowLocal: false,
+        lookupFn: async () => [
+          { address: '104.18.32.47', family: 4 },
+          { address: '10.0.0.5', family: 4 }
+        ]
+      }),
+    (err) => /内网或保留地址/.test(err.message)
+  );
+});
+
+

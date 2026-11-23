@@ -89,11 +89,36 @@ function isLoopbackHost(hostname) {
   return classifyIp(h) === 'loopback';
 }
 
+function extractRawHost(rawUrl) {
+  const m = String(rawUrl || '').trim().match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#\\]+)/);
+  if (!m) return '';
+  let authority = m[1];
+  const atIdx = authority.lastIndexOf('@');
+  if (atIdx !== -1) authority = authority.slice(atIdx + 1);
+  if (authority.startsWith('[')) {
+    const closeIdx = authority.indexOf(']');
+    return closeIdx !== -1 ? authority.slice(1, closeIdx) : authority;
+  }
+  const colonIdx = authority.indexOf(':');
+  return colonIdx !== -1 ? authority.slice(0, colonIdx) : authority;
+}
+
 function isSuspiciousNumericHost(hostname) {
   const h = String(hostname || '').trim().replace(/^\[|\]$/g, '');
-  if (/^\d+$/.test(h)) return true; // Decimal integer IP like 2130706433
-  if (/^0x[0-9a-f]+$/i.test(h)) return true; // Hex IP like 0x7f000001
-  if (/^0\d+\./.test(h)) return true; // Octal dotted IP like 0177.0.0.1
+  if (!h) return false;
+  // Strip a single trailing dot if present
+  const clean = h.endsWith('.') ? h.slice(0, -1) : h;
+  if (!clean) return false;
+  if (/^\d+$/.test(clean)) return true; // Decimal integer IP like 2130706433
+  if (/^0x[0-9a-f]+$/i.test(clean)) return true; // Hex IP like 0x7f000001
+
+  const parts = clean.split('.');
+  const allNumericOrHex = parts.length >= 2 && parts.every((p) => /^(?:0x[0-9a-f]+|\d+)$/i.test(p));
+  if (allNumericOrHex) {
+    if (parts.length !== 4) return true; // Shorthand dotted IPv4 like 127.1 or 127.0.1
+    if (parts.some((p) => /^0x[0-9a-f]+$/i.test(p))) return true; // Mixed hex dotted like 0x7f.0.0.1
+    if (parts.some((p) => /^0\d+$/.test(p))) return true; // Octal dotted like 0177.0.0.1
+  }
   return false;
 }
 
@@ -134,7 +159,7 @@ function normalizeBaseUrl(rawUrl) {
 /**
  * Validate user-supplied `baseUrl` against SSRF rules:
  * - Only HTTPS allowed by default; HTTP is permitted ONLY when `allowLocal === true` AND `serverAllowLocal === true` AND target is loopback.
- * - Rejects credentials in URL, non-standard control characters, numeric IP encodings, private/link-local/reserved IPs.
+ * - Rejects credentials in URL, non-standard control characters, numeric IP encodings (checked BEFORE WHATWG URL normalization), private/link-local/reserved IPs.
  * - Resolves DNS via `lookupFn` and verifies every resolved address.
  */
 async function validateBaseUrl(
@@ -148,6 +173,11 @@ async function validateBaseUrl(
   const rawStr = String(rawUrl || '').trim();
   if (!rawStr) {
     throw new Error('Base URL 不能为空');
+  }
+
+  const rawHostBeforeParse = extractRawHost(rawStr);
+  if (rawHostBeforeParse && isSuspiciousNumericHost(rawHostBeforeParse)) {
+    throw new Error('Base URL 禁止使用非标准数值编码 IP 地址');
   }
 
   let parsed;
